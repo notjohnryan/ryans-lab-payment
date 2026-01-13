@@ -20,6 +20,7 @@ app.get('/pay', async (req, res) => {
         attributes: {
           send_email_receipt: true,
           show_description: true,
+          description: "Top-up for 5,000,000 tokens for Ryan's Lab.",
           line_items: [{
             amount: 25000, 
             currency: 'PHP',
