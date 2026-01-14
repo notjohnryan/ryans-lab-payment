@@ -1,5 +1,5 @@
 app.post('/webhook', async (req, res) => {
-  console.log("🔔 Webhook Triggered");
+  console.log("🔔 Webhook Received for Ryan's Lab");
   const data = req.body.data;
 
   if (data && data.type === 'checkout_session.payment.paid') {
@@ -11,25 +11,29 @@ app.post('/webhook', async (req, res) => {
       const client = new MongoClient(MONGO_URI);
       await client.connect();
       
-      const db = client.db(); 
-      console.log(`Searching in Database: ${db.databaseName}`); // This confirms the DB name
+      const db = client.db("Ryan's Lab"); 
+      const collection = db.collection('test'); // Your collection name
 
-      const users = db.collection('users'); // Ensure this matches Compass exactly
-      
-      const result = await users.updateOne(
+      console.log(`🚀 Updating: Adding ${creditsToAdd} to balances.tokenCredits for User: ${userId}`);
+
+      // SEARCH BY _id (The Title)
+      // UPDATE balances.tokenCredits (The Folder)
+      const result = await collection.updateOne(
         { _id: new ObjectId(userId) }, 
-        { $inc: { balance: creditsToAdd } } // Ensure 'balance' matches Compass field
+        { 
+          $inc: { "balances.tokenCredits": creditsToAdd } 
+        }
       );
 
       if (result.modifiedCount > 0) {
-        console.log(`✅ SUCCESS: Added ${creditsToAdd} to User ${userId}`);
+        console.log(`✅ SUCCESS: Tokens added to the balances folder for User ${userId}`);
       } else {
-        console.log(`❌ FAIL: Found 0 users with ID ${userId} in ${db.databaseName}.users`);
+        console.error(`❌ FAIL: Found the database, but no user has the _id: ${userId}`);
       }
 
       await client.close();
     } catch (err) {
-      console.error("🔥 Error during update:", err.message);
+      console.error("🔥 Webhook/DB Error:", err.message);
     }
   }
   res.status(200).send('OK');
