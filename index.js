@@ -2,6 +2,9 @@ const express = require('express');
 const axios = require('axios');
 const app = express();
 
+// 👇 REQUIRED FOR WEBHOOKS (ADDED THIS)
+app.use(express.json());
+
 const PAYMONGO_SECRET = process.env.PAYMONGO_SECRET_KEY;
 const SUCCESS_URL = process.env.SUCCESS_URL; 
 
@@ -20,8 +23,14 @@ const PRICING = {
   }
 };
 
+// 👇 THIS IS THE CRITICAL CHANGE WE DISCUSSED
 app.get('/pay', async (req, res) => {
   try {
+    // 👇 ADD USER ID TRACKING (THIS IS NEW)
+    const userId = 'test_user_123'; // WE'LL FIX THIS LATER IN STEP 2
+    console.log('ℹ️ Creating payment for user:', userId);
+    req.query.user_id = userId; // Pass to metadata below
+    
     // Parse quantity from query (default to 1)
     let quantity = parseInt(req.query.quantity) || 1;
     
@@ -40,6 +49,7 @@ app.get('/pay', async (req, res) => {
     const formatPHP = (centavos) => (centavos / 100).toFixed(2);
     
     console.log(`Processing purchase: ${quantity} pack(s)`);
+    console.log(`- User ID: ${userId}`); // 👈 NEW LOG
     console.log(`- Price per pack: ${formatPHP(pricePerPack)} PHP`);
     console.log(`- Total price: ${formatPHP(totalPrice)} PHP`);
     console.log(`- Total tokens: ${totalTokens.toLocaleString()}`);
@@ -66,6 +76,12 @@ app.get('/pay', async (req, res) => {
                 quantity: quantity
               }
             ],
+            // 👇 ADD METADATA (THIS IS THE KEY CHANGE)
+            metadata: {
+              user_id: userId,  // Using the userId we defined earlier
+              quantity: quantity,
+              token_credits: totalTokens
+            },
             // Added 'card' for broader payment options
             payment_method_types: ['qrph', 'card'],
             success_url: SUCCESS_URL,
@@ -76,6 +92,7 @@ app.get('/pay', async (req, res) => {
     };
 
     const response = await axios.request(options);
+    console.log('ℹ️ Redirecting to PayMongo:', response.data.data.attributes.checkout_url);
     res.redirect(response.data.data.attributes.checkout_url);
   } catch (error) {
     console.error("PayMongo Error:", error.response ? error.response.data : error);
@@ -84,4 +101,4 @@ app.get('/pay', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Payment server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Payment server running on port ${PORT}\n\n✅ STEP 1 COMPLETE!\n`));
