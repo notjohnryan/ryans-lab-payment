@@ -1,38 +1,52 @@
 const express = require('express');
 const crypto = require('crypto');
-const mongoose = require('mongoose');
 const app = express();
 app.use(express.json());
 
-// MongoDB connection URI (from Railway)
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/ryanslab';
+let mongoose; // Will initialize later
+let User;     // Will initialize later
+let PAYMONGO_WEBHOOK_SECRET;
 
-// PayMongo webhook secret (get from PayMongo dashboard later)
-const PAYMONGO_WEBHOOK_SECRET = process.env.PAYMONGO_WEBHOOK_SECRET || 'temp_secret';
+// Initialize AFTER server starts (avoids build-time secret access)
+const initializeServices = async () => {
+  try {
+    // Get secrets at runtime (not build time!)
+    PAYMONGO_WEBHOOK_SECRET = process.env.PAYMONGO_WEBHOOK_SECRET;
+    if (!PAYMONGO_WEBHOOK_SECRET) {
+      throw new Error('PAYMONGO_WEBHOOK_SECRET is required!');
+    }
 
-// Connect to MongoDB
-mongoose.connect(MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => {
-  console.log('✅ Connected to MongoDB');
-}).catch(err => {
-  console.error('❌ MongoDB connection error:', err);
-  process.exit(1); // Exit if DB connection fails
-});
+    // Connect to MongoDB at runtime
+    mongoose = require('mongoose');
+    await mongoose.connect(process.env.MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true
+    });
 
-// User model (matches your Ryan's Lab DB structure)
-const UserSchema = new mongoose.Schema({
-  _id: { type: String, required: true }, // Using string ID (from auth)
-  email: { type: String, unique: true },
-  tokenCredits: { type: Number, default: 0 },
-  lastTopUp: Date,
-  createdAt: { type: Date, default: Date.now }
-});
-const User = mongoose.model('User', UserSchema);
+    // Define User model after DB connection
+    const UserSchema = new mongoose.Schema({
+      _id: { type: String, required: true },
+      email: { type: String, unique: true },
+      tokenCredits: { type: Number, default: 0 },
+      lastTopUp: Date,
+      createdAt: { type: Date, default: Date.now }
+    });
+    User = mongoose.model('User', UserSchema);
+
+    console.log('✅ Services initialized successfully');
+  } catch (error) {
+    console.error('❌ Initialization failed:', error);
+    process.exit(1); // Exit since we can't function without these
+  }
+};
 
 // Webhook validation middleware
 const validateWebhook = (req, res, next) => {
+  if (!PAYMONGO_WEBHOOK_SECRET) {
+    console.error('❌ Webhook secret not initialized');
+    return res.status(500).send('Server configuration error');
+  }
+  
   const signature = req.headers['paymongo-signature'];
   if (!signature) {
     console.error('❌ Missing signature header');
@@ -57,25 +71,35 @@ const validateWebhook = (req, res, next) => {
 // Handle payment success events
 app.post('/webhook', validateWebhook, async (req, res) => {
   try {
+    // Ensure services are initialized
+    if (!User) {
+      await initializeServices();
+    }
+    
     const event = req.body;
     
-    // Log the entire event for debugging (remove in production)
-    console.log('📥 Received webhook:', JSON.stringify({
-      id: event.data.id,
-      type: event.data.attributes.type,
-      status: event.data.attributes.data.attributes.payment_intent.attributes.status
-    }, null, 2));
+    // Log minimal event info (safe for builds)
+    console.log('📥 Received webhook:', {
+      id: event.data?.id,
+      type: event.data?.attributes?.type,
+      status: event.data?.attributes?.data?.attributes?.payment_intent?.attributes?.status
+    });
     
     // Only process successful checkout sessions
-    const isCheckoutSession = event.data.attributes.type === 'checkout.session';
-    const isPaymentSucceeded = event.data.attributes.data.attributes.payment_intent.attributes.status === 'succeeded';
+    const isCheckoutSession = event.data?.attributes?.type === 'checkout.session';
+    const isPaymentSucceeded = event.data?.attributes?.data?.attributes?.payment_intent?.attributes?.status === 'succeeded';
     
     if (isCheckoutSession && isPaymentSucceeded) {
-      const metadata = event.data.attributes.data.attributes.metadata;
+      const metadata = event.data?.attributes?.data?.attributes?.metadata;
       
       // Critical info from PayMongo
-      const userId = metadata.user_id;
-      const tokenCredits = parseInt(metadata.token_credits);
+      const userId = metadata?.user_id;
+      const tokenCredits = parseInt(metadata?.token_credits || 0);
+      
+      if (!userId || !tokenCredits) {
+        console.error('❌ Missing required metadata:', { userId, tokenCredits });
+        return res.status(400).send('Invalid payment metadata');
+      }
       
       console.log(`🏦 Processing payment for user: ${userId}`);
       console.log(`💰 Adding ${tokenCredits.toLocaleString()} tokens`);
@@ -87,7 +111,7 @@ app.post('/webhook', validateWebhook, async (req, res) => {
           $inc: { tokenCredits: tokenCredits },
           $set: { lastTopUp: new Date() }
         },
-        { new: true, upsert: false } // Don't create if user doesn't exist
+        { new: true, upsert: false }
       );
       
       if (!user) {
@@ -110,6 +134,7 @@ app.post('/webhook', validateWebhook, async (req, res) => {
 });
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => 
-  console.log(`\n webhook server running on port ${PORT}\n\n✅ STEP 2 COMPLETE! ✅\n`)
-);
+app.listen(PORT, async () => {
+  console.log(`\nWebhook server running on port ${PORT}`);
+  await initializeServices(); // Initialize after server starts
+});
