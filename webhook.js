@@ -7,43 +7,43 @@ app.post('/webhook', async (req, res) => {
       const metadata = data.attributes.metadata;
       const db = client.db("test");
       const userId = metadata.userId;
+      const amount = parseInt(metadata.token_credits);
 
-      console.log(`🔍 Searching for User: ${userId}`);
+      // 1. ADDRESSING THE ObjectId vs String issue
+      // This converts your string ID into the purple 'ObjectId' format Mongo uses
+      let queryId;
+      try {
+        queryId = new ObjectId(userId);
+      } catch (e) {
+        queryId = userId; // Fallback to string if conversion fails
+      }
 
-      // 1. Prepare all possible ID formats
-      const asObjectId = userId.length === 24 ? new ObjectId(userId) : null;
-      
-      // 2. Search both collections/fields using an OR filter
-      // This covers: _id as Object, _id as String, and the 'user' field
-      const query = {
+      // 2. SEARCH BOTH FIELDS (_id and user)
+      const query = { 
         $or: [
-          { _id: asObjectId },
-          { _id: userId },
-          { user: asObjectId },
+          { _id: queryId }, 
+          { _id: userId }, 
+          { user: queryId }, 
           { user: userId }
-        ]
+        ] 
       };
 
-      // 3. Try updating the 'users' collection first
-      let result = await db.collection('users').updateOne(query, { 
-        $inc: { "balances.tokenCredits": parseInt(metadata.token_credits) },
-        $set: { "balances.last_topup": new Date() }
-      });
+      const updateData = { 
+        $inc: { "tokenCredits": amount },
+        $set: { "last_topup": new Date() }
+      };
 
-      // 4. If not found in 'users', try updating the 'balances' collection
-      if (result.matchedCount === 0) {
-        console.log("⚠️ Not found in 'users', trying 'balances' collection...");
-        result = await db.collection('balances').updateOne(query, {
-          $inc: { "tokenCredits": parseInt(metadata.token_credits) },
-          $set: { "last_topup": new Date() }
-        });
-      }
+      // 3. TARGET THE 'balances' COLLECTION
+      const result = await db.collection('balances').updateOne(query, updateData);
 
-      if (result.matchedCount > 0) {
-        console.log(`✅ SUCCESS: Match found and updated!`);
+      if (result.modifiedCount > 0) {
+        console.log(`✅ SUCCESS: Tokens added to ${userId} (ObjectId match)`);
+      } else if (result.matchedCount > 0) {
+        console.log(`⚠️ MATCHED BUT NOT UPDATED: Check if field name is exactly 'tokenCredits'`);
       } else {
-        console.error(`❌ FAILURE: No document found in either collection for ID: ${userId}`);
+        console.log(`❌ NOT FOUND: Could not find ${userId} in balances collection.`);
       }
+
     } catch (err) {
       console.error("❌ DB ERROR:", err.message);
     } finally {
