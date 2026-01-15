@@ -5,10 +5,10 @@ const app = express();
 
 app.use(express.json());
 
-// 1. Health Check - Essential for Railway stability
+// 1. Health Check
 app.get('/', (req, res) => res.status(200).send("SERVER IS ALIVE"));
 
-const PRICING = { 1: 25000, 2: 22500, 3: 20000, 4: 18000 };
+const PRICING = { 1: 25000, 2: 45000, 3: 60000, 4: 72000, 5: 85000 };
 
 // 2. Checkout Session Creator
 app.get('/pay', async (req, res) => {
@@ -17,6 +17,8 @@ app.get('/pay', async (req, res) => {
     const qty = parseInt(quantity) || 1;
     const price = PRICING[qty] || 25000;
     const totalTokens = qty * 5000000;
+
+    console.log(`🛒 Creating PayMongo Session: User ${userId} | Qty ${qty}`);
 
     const options = {
       method: 'POST',
@@ -30,27 +32,30 @@ app.get('/pay', async (req, res) => {
         data: {
           attributes: {
             line_items: [{ amount: price, currency: 'PHP', name: "Token Pack", quantity: qty }],
-            payment_method_types: ['qrph'],
+            payment_method_types: ['qrph', 'gcash', 'card'],
             success_url: process.env.SUCCESS_URL,
             metadata: { userId, token_credits: totalTokens.toString() }
           }
         }
       }
     };
+
     const response = await axios.request(options);
     res.redirect(response.data.data.attributes.checkout_url);
   } catch (error) {
-    res.status(500).send("Error creating payment session");
+    console.error("Pay Route Error:", error.message);
+    res.status(500).send("Error generating checkout link");
   }
 });
 
-// 3. The Webhook - "Bulletproof" Version
+// 3. Webhook with Deep Audit Logic
 app.post('/webhook', async (req, res) => {
   console.log("⚡ Webhook Received");
   const data = req.body.data;
 
   if (data?.type === 'checkout_session.payment.paid') {
     const client = new MongoClient(process.env.MONGO_URI);
+    
     try {
       await client.connect();
       const metadata = data.attributes.metadata;
@@ -58,38 +63,40 @@ app.post('/webhook', async (req, res) => {
       const userId = metadata.userId;
       const amount = parseInt(metadata.token_credits);
 
-      console.log(`🔍 Processing: User ${userId} | Amount ${amount}`);
+      console.log(`🔍 AUDIT START: Looking for User ${userId}`);
 
-      // ADDRESSING THE ObjectId vs String issue
+      // Prepare ID variations
       const asObjectId = userId.length === 24 ? new ObjectId(userId) : null;
-      const query = { $or: [{ user: userId }, { user: asObjectId }, { _id: userId }, { _id: asObjectId }] };
+      const query = { $or: [{ user: asObjectId }, { user: userId }, { _id: asObjectId }, { _id: userId }] };
 
-      // THE "EVERYTHING" UPDATE
-      const updateData = { 
-        $inc: { 
-          "tokenCredits": amount, 
-          "balances.tokenCredits": amount 
-        },
-        $set: { 
-          "last_topup": new Date(),
-          "updatedAt": new Date()
+      // STEP 1: Find the document before doing anything
+      const docBefore = await db.collection('balances').findOne(query);
+
+      if (!docBefore) {
+        console.log("❌ AUDIT FAILED: User not found in 'balances' collection.");
+        // Double check the 'users' collection as fallback
+        const userDoc = await db.collection('users').findOne(query);
+        if (userDoc) {
+          console.log("💡 FOUND IN 'USERS' instead. Attempting update there...");
+          await db.collection('users').updateOne({ _id: userDoc._id }, { $inc: { "tokenCredits": amount } });
         }
-      };
-
-      // Try updating 'balances' collection first (priority for Balance.tsx)
-      const balanceResult = await db.collection('balances').updateOne(query, updateData);
-      
-      if (balanceResult.modifiedCount > 0) {
-        console.log(`✅ SUCCESS: Updated 'balances' collection for ${userId}`);
       } else {
-        // Fallback to 'users' collection
-        console.log("⚠️ No change in 'balances', trying 'users' collection...");
-        const userResult = await db.collection('users').updateOne(query, updateData);
-        
-        if (userResult.modifiedCount > 0) {
-          console.log(`✅ SUCCESS: Updated 'users' collection for ${userId}`);
+        console.log("✅ AUDIT PASSED: Found document. Current DB State:", JSON.stringify(docBefore));
+
+        // STEP 2: Update specifically by the internal _id we just found
+        const result = await db.collection('balances').updateOne(
+          { _id: docBefore._id },
+          { 
+            $inc: { "tokenCredits": amount },
+            $set: { "last_topup": new Date(), "updatedAt": new Date() }
+          }
+        );
+
+        if (result.modifiedCount > 0) {
+          const docAfter = await db.collection('balances').findOne({ _id: docBefore._id });
+          console.log(`🎉 SUCCESS: Token update verified. New Balance: ${docAfter.tokenCredits}`);
         } else {
-          console.log(`❌ FAILED: User ${userId} found but no fields were modified. Check field names!`);
+          console.log("⚠️ ERROR: Document matched but 0 fields modified. Check if 'tokenCredits' is a number.");
         }
       }
 
@@ -104,4 +111,6 @@ app.post('/webhook', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, '0.0.0.0', () => console.log(`✅ Listening on ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Server listening on ${PORT}`);
+});
