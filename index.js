@@ -1,82 +1,80 @@
 const express = require('express');
 const { MongoClient, ObjectId } = require('mongodb');
+const axios = require('axios'); // Ensure you have axios installed
 const app = express();
 
 app.use(express.json());
 
-// 1. Health Check - Confirms the server is awake and domain is connected
+// 1. The Home Page (Health Check)
 app.get('/', (req, res) => {
-  res.send("🚀 Ryan's Lab Payment Server is LIVE and connected to the 'test' database.");
+  res.send("🚀 Ryan's Lab Payment Server is LIVE.");
 });
 
-// 2. Database Connection - Pulls from your Railway Variables
-const uri = process.env.MONGO_URI || process.env.MONGODB_URI;
+// 2. THE CHECKOUT ROUTE (This is what was missing!)
+app.get('/checkout', async (req, res) => {
+  const { userId, amount, tokens } = req.query;
 
-app.post('/webhook', async (req, res) => {
-  // Always acknowledge PayMongo immediately with a 200 OK
-  res.status(200).send('OK');
-
-  console.log("🔔 Webhook received from PayMongo");
+  if (!userId || !amount) {
+    return res.status(400).send("Missing userId or amount");
+  }
 
   try {
+    const options = {
+      method: 'POST',
+      url: 'https://api.paymongo.com/v1/checkout_sessions',
+      headers: {
+        accept: 'application/json',
+        'Content-Type': 'application/json',
+        authorization: `Basic ${Buffer.from(process.env.PAYMONGO_SECRET_KEY).toString('base64')}`
+      },
+      data: {
+        data: {
+          attributes: {
+            send_email_receipt: true,
+            show_description: true,
+            show_line_items: true,
+            description: `Top-up: ${tokens} Tokens`,
+            line_items: [{ amount: parseInt(amount) * 100, currency: 'PHP', name: 'Token Pack', quantity: 1 }],
+            payment_method_types: ['gcash', 'card', 'paymaya'],
+            success_url: process.env.SUCCESS_URL || 'https://chat.ryanslab.space',
+            metadata: { userId: userId, token_credits: tokens.toString() }
+          }
+        }
+      }
+    };
+
+    const response = await axios.request(options);
+    // Redirect the user to the PayMongo Checkout Page
+    res.redirect(response.data.data.attributes.checkout_url);
+  } catch (err) {
+    console.error("Checkout Error:", err.response?.data || err.message);
+    res.status(500).send("Failed to create checkout session");
+  }
+});
+
+// 3. THE WEBHOOK ROUTE (For database updates)
+app.post('/webhook', async (req, res) => {
+  res.status(200).send('OK');
+  try {
     const data = req.body.data;
-    // PayMongo usually nests metadata inside attributes.payload or attributes
-    const attributes = data?.attributes || {};
-    const payload = attributes.payload || attributes;
-    const metadata = payload.metadata;
+    const metadata = data?.attributes?.payload?.metadata || data?.attributes?.metadata;
+    if (!metadata || !metadata.userId) return;
 
-    if (!metadata || !metadata.userId) {
-      console.log("⚠️ Webhook arrived but metadata or userId is missing.");
-      return;
-    }
-
-    const userId = metadata.userId;
-    const creditsToAdd = parseInt(metadata.token_credits);
-
-    const client = new MongoClient(uri);
+    const client = new MongoClient(process.env.MONGO_URI);
     await client.connect();
-    
-    // Confirmed: Database is 'test', Collection is 'users'
-    const db = client.db("test"); 
+    const db = client.db("test");
     const collection = db.collection('users');
 
-    console.log(`🔎 Target: UserID [${userId}] | Adding [${creditsToAdd}] credits`);
-
-    /**
-     * THE UPDATE:
-     * We use "balances.tokenCredits" (Dot Notation) to reach the nested field.
-     * $inc adds the number to the existing total.
-     * $set adds a timestamp so you know when it last worked.
-     */
-    const result = await collection.updateOne(
-      { _id: new ObjectId(userId) },
-      { 
-        $inc: { "balances.tokenCredits": creditsToAdd },
-        $set: { "balances.last_topup": new Date() }
-      }
+    await collection.updateOne(
+      { _id: new ObjectId(metadata.userId) },
+      { $inc: { "balances.tokenCredits": parseInt(metadata.token_credits) } }
     );
-
-    if (result.modifiedCount > 0) {
-      console.log(`✅ SUCCESS: Added ${creditsToAdd} tokens to user ${userId}.`);
-    } else {
-      console.error(`❌ FAIL: User ID ${userId} exists but 0 documents were updated.`);
-      
-      // Diagnostic check: Does the user even exist?
-      const userCheck = await collection.findOne({ _id: new ObjectId(userId) });
-      if (!userCheck) {
-        console.log("❌ DIAGNOSTIC: User ID not found in database. Check if the ID is correct.");
-      } else {
-        console.log("❌ DIAGNOSTIC: User found, but 'balances.tokenCredits' path might be spelled wrong in Compass.");
-      }
-    }
-
     await client.close();
+    console.log(`✅ Tokens added to ${metadata.userId}`);
   } catch (err) {
-    console.error("🔥 CRITICAL SERVER ERROR:", err.message);
+    console.error("Webhook Error:", err.message);
   }
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Ryan's Lab Payment Server listening on port ${PORT}`);
-});
+app.listen(PORT, '0.0.0.0', () => console.log(`Listening on ${PORT}`));
