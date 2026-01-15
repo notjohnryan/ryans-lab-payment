@@ -5,20 +5,18 @@ const app = express();
 
 app.use(express.json());
 
-// 1. Health Check - Keeps Railway container stable
+// 1. Health Check - Essential for Railway stability
 app.get('/', (req, res) => res.status(200).send("SERVER IS ALIVE"));
 
 const PRICING = { 1: 25000, 2: 22500, 3: 20000, 4: 18000 };
 
-// 2. Checkout Route
+// 2. Checkout Session Creator
 app.get('/pay', async (req, res) => {
   try {
     const { userId, quantity } = req.query;
     const qty = parseInt(quantity) || 1;
     const price = PRICING[qty] || 25000;
     const totalTokens = qty * 5000000;
-
-    console.log(`🛒 Creating PayMongo Session: User ${userId} | Qty ${qty}`);
 
     const options = {
       method: 'POST',
@@ -39,23 +37,20 @@ app.get('/pay', async (req, res) => {
         }
       }
     };
-
     const response = await axios.request(options);
     res.redirect(response.data.data.attributes.checkout_url);
   } catch (error) {
-    console.error("Pay Route Error:", error.message);
-    res.status(500).send("Error generating checkout link");
+    res.status(500).send("Error creating payment session");
   }
 });
 
-// 3. Webhook Route - The "Shotgun" Update
+// 3. The Webhook - "Bulletproof" Version
 app.post('/webhook', async (req, res) => {
   console.log("⚡ Webhook Received");
-  
   const data = req.body.data;
+
   if (data?.type === 'checkout_session.payment.paid') {
     const client = new MongoClient(process.env.MONGO_URI);
-    
     try {
       await client.connect();
       const metadata = data.attributes.metadata;
@@ -63,48 +58,50 @@ app.post('/webhook', async (req, res) => {
       const userId = metadata.userId;
       const amount = parseInt(metadata.token_credits);
 
-      console.log(`🔍 Processing top-up for: ${userId} (${amount} tokens)`);
+      console.log(`🔍 Processing: User ${userId} | Amount ${amount}`);
 
-      // Prepare ID variations (String vs ObjectId)
+      // ADDRESSING THE ObjectId vs String issue
       const asObjectId = userId.length === 24 ? new ObjectId(userId) : null;
-      const query = { $or: [{ _id: asObjectId }, { _id: userId }, { user: asObjectId }, { user: userId }] };
+      const query = { $or: [{ user: userId }, { user: asObjectId }, { _id: userId }, { _id: asObjectId }] };
 
-      // Aggressive update: Targets both nested and top-level balance fields
+      // THE "EVERYTHING" UPDATE
       const updateData = { 
         $inc: { 
-          "balances.tokenCredits": amount, 
-          "tokenCredits": amount 
+          "tokenCredits": amount, 
+          "balances.tokenCredits": amount 
         },
         $set: { 
-          "balances.last_topup": new Date(),
-          "last_topup": new Date() 
+          "last_topup": new Date(),
+          "updatedAt": new Date()
         }
       };
 
-      // Apply to both collections found in your DB
-      const updateUsers = await db.collection('users').updateOne(query, updateData);
-      const updateBalances = await db.collection('balances').updateOne(query, updateData);
-
-      const modifiedCount = (updateUsers.modifiedCount || 0) + (updateBalances.modifiedCount || 0);
-
-      if (modifiedCount > 0) {
-        console.log(`✅ SUCCESS: Tokens added to ${userId}`);
+      // Try updating 'balances' collection first (priority for Balance.tsx)
+      const balanceResult = await db.collection('balances').updateOne(query, updateData);
+      
+      if (balanceResult.modifiedCount > 0) {
+        console.log(`✅ SUCCESS: Updated 'balances' collection for ${userId}`);
       } else {
-        console.log(`⚠️ MATCHED BUT NOT MODIFIED: User ${userId} might already have these values.`);
+        // Fallback to 'users' collection
+        console.log("⚠️ No change in 'balances', trying 'users' collection...");
+        const userResult = await db.collection('users').updateOne(query, updateData);
+        
+        if (userResult.modifiedCount > 0) {
+          console.log(`✅ SUCCESS: Updated 'users' collection for ${userId}`);
+        } else {
+          console.log(`❌ FAILED: User ${userId} found but no fields were modified. Check field names!`);
+        }
       }
 
     } catch (err) {
       console.error("❌ DB ERROR:", err.message);
     } finally {
       await client.close();
-      return res.status(200).send('OK'); 
+      return res.status(200).send('OK');
     }
   }
-  
   res.status(200).send('OK');
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Server listening on ${PORT}`);
-});
+app.listen(PORT, '0.0.0.0', () => console.log(`✅ Listening on ${PORT}`));
