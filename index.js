@@ -1,31 +1,48 @@
 const express = require('express');
 const axios = require('axios');
-const { MongoClient, ObjectId } = require('mongodb'); // Added MongoDB support
 const app = express();
-
-app.use(express.json());
 
 const PAYMONGO_SECRET = process.env.PAYMONGO_SECRET_KEY;
 const SUCCESS_URL = process.env.SUCCESS_URL; 
-const MONGO_URI = process.env.MONGO_URI; // Add this variable in Railway!
 
+// Define your pricing structure
 const PRICING = {
-  tokenPackSize: 5000000, 
-  basePrice: 25000,        
+  tokenPackSize: 5000000, // 5 million tokens per pack
+  basePrice: 25000,        // 250 PHP in centavos (PayMongo uses centavos)
+  
+  // Volume pricing: quantity -> price per pack (in centavos)
   volumeDiscounts: {
-    1: 25000, 2: 22500, 3: 20000, 4: 18000
+    1: 25000,  // 250 PHP for 1 pack
+    2: 22500,  // 225 PHP per pack for 2 packs = 450 PHP total
+    3: 20000,  // 200 PHP per pack for 3 packs = 600 PHP total
+    4: 18000,  // 180 PHP per pack for 4 packs = 720 PHP total
+    // Add more discounts as needed
   }
 };
 
-// 1. PAYMENT TRIGGER
 app.get('/pay', async (req, res) => {
   try {
-    // Dynamic User ID from URL
-    const userId = req.query.userId || 'guest'; 
+    // Parse quantity from query (default to 1)
     let quantity = parseInt(req.query.quantity) || 1;
     
+    // Validate quantity (1-10 packs max)
+    const MAX_QUANTITY = 10;
+    if (quantity < 1 || quantity > MAX_QUANTITY) {
+      return res.status(400).send(`Invalid quantity. Please select 1-${MAX_QUANTITY} packs.`);
+    }
+    
+    // Calculate price per pack based on quantity
     const pricePerPack = PRICING.volumeDiscounts[quantity] || PRICING.basePrice;
+    const totalPrice = pricePerPack * quantity;
     const totalTokens = quantity * PRICING.tokenPackSize;
+    
+    // Generate human-readable price display
+    const formatPHP = (centavos) => (centavos / 100).toFixed(2);
+    
+    console.log(`Processing purchase: ${quantity} pack(s)`);
+    console.log(`- Price per pack: ${formatPHP(pricePerPack)} PHP`);
+    console.log(`- Total price: ${formatPHP(totalPrice)} PHP`);
+    console.log(`- Total tokens: ${totalTokens.toLocaleString()}`);
     
     const options = {
       method: 'POST',
@@ -41,17 +58,16 @@ app.get('/pay', async (req, res) => {
             send_email_receipt: true,
             show_description: true,
             description: `Top-up for ${totalTokens.toLocaleString()} tokens for Ryan's Lab.`,
-            line_items: [{
-              amount: pricePerPack,
-              currency: 'PHP',
-              name: "Ryan's Lab: 5M Tokens",
-              quantity: quantity
-            }],
-            metadata: {
-              userId: userId, // Match key used in Balance.tsx
-              token_credits: totalTokens
-            },
-            payment_method_types: ['qrph', 'card', 'gcash', 'paymaya'],
+            line_items: [
+              {
+                amount: pricePerPack,
+                currency: 'PHP',
+                name: "Ryan's Lab: 5M Tokens",
+                quantity: quantity
+              }
+            ],
+            // Added 'card' for broader payment options
+            payment_method_types: ['qrph', 'card'],
             success_url: SUCCESS_URL,
             cancel_url: SUCCESS_URL
           }
@@ -63,42 +79,9 @@ app.get('/pay', async (req, res) => {
     res.redirect(response.data.data.attributes.checkout_url);
   } catch (error) {
     console.error("PayMongo Error:", error.response ? error.response.data : error);
-    res.status(500).send("Payment System Error.");
+    res.status(500).send("Payment System Error. Please contact Ryan's Lab AI.");
   }
-});
-
-// 2. AUTOMATION WEBHOOK (THE MAGIC)
-app.post('/webhook', async (req, res) => {
-  const data = req.body.data;
-  
-  if (data.type === 'checkout_session.payment.paid') {
-    const metadata = data.attributes.payload.metadata;
-    const userId = metadata.userId;
-    const creditsToAdd = parseInt(metadata.token_credits);
-
-    console.log(`💰 Payment Success! Adding ${creditsToAdd} tokens to User: ${userId}`);
-
-    const client = new MongoClient(MONGO_URI);
-    try {
-      await client.connect();
-      const db = client.db(); 
-      const users = db.collection('users');
-
-      // Update the user's balance automatically
-      await users.updateOne(
-        { _id: new ObjectId(userId) }, 
-        { $inc: { balance: creditsToAdd } }
-      );
-
-      console.log(`✅ Database Updated: +${creditsToAdd} for ${userId}`);
-    } catch (err) {
-      console.error("❌ Automation Database Error:", err);
-    } finally {
-      await client.close();
-    }
-  }
-  res.status(200).send('OK');
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Automation server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Payment server running on port ${PORT}`));
