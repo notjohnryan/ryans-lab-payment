@@ -32,7 +32,7 @@ app.get('/pay', async (req, res) => {
         data: {
           attributes: {
             line_items: [{ amount: price, currency: 'PHP', name: "Token Pack", quantity: qty }],
-            payment_method_types: ['qrph', 'gcash', 'card'],
+            payment_method_types: ['qrph'],
             success_url: process.env.SUCCESS_URL,
             metadata: { userId, token_credits: totalTokens.toString() }
           }
