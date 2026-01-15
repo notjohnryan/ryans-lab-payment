@@ -1,50 +1,46 @@
 app.post('/webhook', async (req, res) => {
-  console.log("🔔 Webhook Received for Ryan's Lab");
+  // 1. Respond to PayMongo immediately to prevent timeouts
+  res.status(200).send('OK'); 
+  
   const data = req.body.data;
-
   if (data && data.type === 'checkout_session.payment.paid') {
-    const client = new MongoClient(MONGO_URI);
+    const client = new MongoClient(process.env.MONGO_URI);
     try {
-      const metadata = data.attributes.payload.metadata;
+      const attributes = data.attributes || {};
+      const payload = attributes.payload || attributes;
+      const metadata = payload.metadata;
+      
       const userId = metadata.userId;
       const creditsToAdd = parseInt(metadata.token_credits);
 
-      console.log(`🚀 Processing: UserID [${userId}] | Credits [${creditsToAdd}]`);
+      console.log(`💰 Webhook Success: User [${userId}] | Credits [${creditsToAdd}]`);
 
       await client.connect();
-      const db = client.db("Ryan's Lab"); 
-      const collection = db.collection('test'); 
+      const db = client.db("test"); 
+      const collection = db.collection('users');
 
-      // 1. DIAGNOSTIC: Try to find the user first to see what's wrong
-      const findById = await collection.findOne({ _id: new ObjectId(userId) });
-      const findByString = await collection.findOne({ _id: userId });
-      const findByUserField = await collection.findOne({ user: userId });
-
-      console.log(`🔎 Search Results: ObjectId match: ${!!findById} | String match: ${!!findByString} | 'user' field match: ${!!findByUserField}`);
-
-      // 2. THE UPDATE: Use whichever method worked
-      const query = findById ? { _id: new ObjectId(userId) } : 
-                    findByString ? { _id: userId } : 
-                    { user: userId };
+      // Handle both ObjectId and String formats for the _id
+      const query = { 
+        _id: userId.length === 24 ? new ObjectId(userId) : userId 
+      };
 
       const result = await collection.updateOne(
         query, 
         { 
-          $inc: { "balances.tokenCredits": creditsToAdd }
+          $inc: { "balances.tokenCredits": creditsToAdd },
+          $set: { "balances.last_topup": new Date() }
         }
       );
 
       if (result.modifiedCount > 0) {
-        console.log(`✅ SUCCESS: Tokens added to balances.tokenCredits for ${userId}`);
+        console.log(`✅ DATABASE UPDATED: +${creditsToAdd.toLocaleString()} tokens for ${userId}`);
       } else {
-        console.error(`❌ FAIL: Could not update user. Query used: ${JSON.stringify(query)}`);
+        console.error(`❌ DB UPDATE FAILED: User ${userId} not found in test.users`);
       }
-
     } catch (err) {
       console.error("🔥 Webhook/DB Error:", err.message);
     } finally {
       await client.close();
     }
   }
-  res.status(200).send('OK');
 });
