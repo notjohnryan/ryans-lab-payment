@@ -5,27 +5,18 @@ const app = express();
 
 app.use(express.json());
 
-// 1. Health Check - Keeps Railway "Green"
-app.get('/', (req, res) => {
-  res.status(200).send("SERVER IS ALIVE");
-});
+// 1. Instant Health Check - Prevents Railway from killing the app
+app.get('/', (req, res) => res.status(200).send("SERVER IS ALIVE"));
 
-// 2. Pricing Logic (PHP in cents: 25000 = 250.00 PHP)
 const PRICING = { 1: 25000, 2: 22500, 3: 20000, 4: 18000 };
-const TOKEN_PACK_SIZE = 5000000;
 
-// 3. PAYMENT TRIGGER (Redirects to PayMongo)
 app.get('/pay', async (req, res) => {
   try {
     const { userId, quantity } = req.query;
-    if (!userId) return res.status(400).send("Missing userId");
-
     const qty = parseInt(quantity) || 1;
     const price = PRICING[qty] || 25000;
-    const totalTokens = qty * TOKEN_PACK_SIZE;
-
-    // LOG: Shows in Railway when user clicks "Top Up"
-    console.log(`🛒 CHECKOUT INITIATED: User [${userId}] | Qty [${qty}] | Tokens [${totalTokens.toLocaleString()}]`);
+    
+    console.log(`🛒 PAY: User ${userId} | Qty ${qty}`);
 
     const options = {
       method: 'POST',
@@ -38,91 +29,66 @@ app.get('/pay', async (req, res) => {
       data: {
         data: {
           attributes: {
-            send_email_receipt: true,
-            show_description: true,
-            description: `Top-up for ${totalTokens.toLocaleString()} tokens`,
-            line_items: [{ 
-              amount: price, 
-              currency: 'PHP', 
-              name: "Ryan's Lab: Token Pack", 
-              quantity: qty 
-            }],
+            line_items: [{ amount: price, currency: 'PHP', name: "Token Pack", quantity: qty }],
             payment_method_types: ['qrph', 'gcash', 'card', 'paymaya'],
             success_url: process.env.SUCCESS_URL,
-            cancel_url: process.env.SUCCESS_URL,
-            metadata: { 
-              userId: userId, 
-              token_credits: totalTokens.toString() 
-            }
+            metadata: { userId, token_credits: (qty * 5000000).toString() }
           }
         }
       }
     };
 
     const response = await axios.request(options);
-    console.log(`🔗 PayMongo Link Created for ${userId}. Redirecting...`);
     res.redirect(response.data.data.attributes.checkout_url);
   } catch (error) {
-    console.error("❌ PayMongo Error:", error.response ? error.response.data : error.message);
-    res.status(500).send("Payment System Error.");
+    console.error("Pay Error:", error.message);
+    res.status(500).send("Error");
   }
 });
 
-// 4. AUTOMATION WEBHOOK (Credits tokens to DB)
 app.post('/webhook', async (req, res) => {
-  // Respond OK to PayMongo immediately
-  res.status(200).send('OK');
-
+  console.log("⚡ Webhook Received");
+  
   const data = req.body.data;
-  if (data && data.type === 'checkout_session.payment.paid') {
+  if (data?.type === 'checkout_session.payment.paid') {
     const client = new MongoClient(process.env.MONGO_URI);
     try {
-      const attributes = data.attributes || {};
-      const payload = attributes.payload || attributes;
-      const metadata = payload.metadata;
-      
-      const userId = metadata.userId;
-      const creditsToAdd = parseInt(metadata.token_credits);
-
-      console.log(`💰 Webhook Received: Crediting ${creditsToAdd} tokens to User ${userId}`);
-
       await client.connect();
-      const db = client.db("test"); // Using the verified DB name
-      const collection = db.collection('users'); // Using the verified collection name
+      const metadata = data.attributes.metadata;
+      const db = client.db("test");
+      const userId = metadata.userId;
 
-      // Safety: Handle both ObjectId and String ID formats
-      const query = { 
-        _id: userId.length === 24 ? new ObjectId(userId) : userId 
-      };
+      // UNIVERSAL SEARCH: Handles both 'users' and 'balances' collections
+      const asObjectId = userId.length === 24 ? new ObjectId(userId) : null;
+      const query = { $or: [{ _id: asObjectId }, { _id: userId }, { user: asObjectId }, { user: userId }] };
 
-      const result = await collection.updateOne(
-        query, 
-        { 
-          $inc: { "balances.tokenCredits": creditsToAdd },
-          $set: { "balances.last_topup": new Date() }
-        }
-      );
+      // Try 'users' collection first
+      let result = await db.collection('users').updateOne(query, { 
+        $inc: { "balances.tokenCredits": parseInt(metadata.token_credits) },
+        $set: { "balances.last_topup": new Date() }
+      });
 
-      if (result.modifiedCount > 0) {
-        console.log(`✅ DATABASE UPDATED: +${creditsToAdd.toLocaleString()} for ${userId}`);
-      } else {
-        console.error(`❌ DB FAIL: User ${userId} not found in test.users collection.`);
+      // If not found, try the 'balances' collection
+      if (result.matchedCount === 0) {
+        console.log("Searching in 'balances' collection...");
+        result = await db.collection('balances').updateOne(query, {
+          $inc: { "tokenCredits": parseInt(metadata.token_credits) },
+          $set: { "last_topup": new Date() }
+        });
       }
+
+      console.log(result.matchedCount > 0 ? `✅ SUCCESS: Credited ${userId}` : `❌ NOT FOUND: ${userId}`);
     } catch (err) {
-      console.error("🔥 Webhook/DB Error:", err.message);
+      console.error("❌ DB ERROR:", err.message);
     } finally {
       await client.close();
+      return res.status(200).send('OK'); // Keeps connection open until work is done
     }
   }
+  res.status(200).send('OK');
 });
 
-// 5. START SERVER
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ EXECUTED: Server listening on ${PORT}`);
-});
-
-// Safety Catch for Railway SIGTERM
-process.on('SIGTERM', () => {
-  console.log('⚠️ SYSTEM: Received SIGTERM. Shutting down gracefully.');
+  console.log(`✅ Server listening on ${PORT}`);
 });
