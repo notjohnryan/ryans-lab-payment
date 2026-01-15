@@ -5,26 +5,23 @@ const app = express();
 
 app.use(express.json());
 
-// Variables from Railway
 const PAYMONGO_SECRET = process.env.PAYMONGO_SECRET_KEY;
 const SUCCESS_URL = process.env.SUCCESS_URL; 
 const MONGO_URI = process.env.MONGO_URI; 
 
-// Your Pricing Logic
 const PRICING = {
   tokenPackSize: 5000000, 
-  basePrice: 25000, // 250.00 PHP in cents
+  basePrice: 25000, 
   volumeDiscounts: {
     1: 25000, 2: 22500, 3: 20000, 4: 18000
   }
 };
 
-// 1. HEALTH CHECK
 app.get('/', (req, res) => {
   res.send("🚀 Ryan's Lab Payment Server is LIVE.");
 });
 
-// 2. PAYMENT TRIGGER (Matches your old /pay path)
+// 1. PAYMENT TRIGGER (With Added Logs)
 app.get('/pay', async (req, res) => {
   try {
     const userId = req.query.userId;
@@ -35,6 +32,9 @@ app.get('/pay', async (req, res) => {
     const pricePerPack = PRICING.volumeDiscounts[quantity] || PRICING.basePrice;
     const totalTokens = quantity * PRICING.tokenPackSize;
     
+    // NEW LOG: This will show in Railway as soon as the user clicks "Top Up"
+    console.log(`🛒 CHECKOUT STARTED: User [${userId}] | Quantity [${quantity}] | Total Tokens [${totalTokens.toLocaleString()}]`);
+
     const options = {
       method: 'POST',
       url: 'https://api.paymongo.com/v1/checkout_sessions',
@@ -68,6 +68,10 @@ app.get('/pay', async (req, res) => {
     };
 
     const response = await axios.request(options);
+    
+    // NEW LOG: Confirms PayMongo is ready
+    console.log(`🔗 PayMongo Session Created for ${userId}. Redirecting...`);
+    
     res.redirect(response.data.data.attributes.checkout_url);
   } catch (error) {
     console.error("PayMongo Error:", error.response ? error.response.data : error);
@@ -75,26 +79,32 @@ app.get('/pay', async (req, res) => {
   }
 });
 
-// 3. AUTOMATION WEBHOOK (With Database Fixes)
+// 2. AUTOMATION WEBHOOK
 app.post('/webhook', async (req, res) => {
-  res.status(200).send('OK'); // Always acknowledge first
+  res.status(200).send('OK'); 
   
   const data = req.body.data;
   if (data.type === 'checkout_session.payment.paid') {
-    const metadata = data.attributes.payload.metadata;
-    const userId = metadata.userId;
-    const creditsToAdd = parseInt(metadata.token_credits);
+    const attributes = data.attributes || {};
+    const payload = attributes.payload || attributes;
+    const metadata = payload.metadata;
+    
+    const userId = metadata?.userId;
+    const creditsToAdd = parseInt(metadata?.token_credits);
 
-    console.log(`💰 Payment Success! Adding ${creditsToAdd} tokens to User: ${userId}`);
+    if (!userId || isNaN(creditsToAdd)) {
+        console.log("⚠️ Webhook received but metadata is invalid.");
+        return;
+    }
+
+    console.log(`💰 PAYMENT SUCCESS: Adding ${creditsToAdd.toLocaleString()} tokens to User: ${userId}`);
 
     const client = new MongoClient(MONGO_URI);
     try {
       await client.connect();
-      // Target the 'test' database and 'users' collection
       const db = client.db('test'); 
       const users = db.collection('users');
 
-      // FIXED PATH: updates "balances.tokenCredits"
       const result = await users.updateOne(
         { _id: new ObjectId(userId) }, 
         { 
@@ -104,12 +114,12 @@ app.post('/webhook', async (req, res) => {
       );
 
       if (result.modifiedCount > 0) {
-        console.log(`✅ Database Updated: +${creditsToAdd} for ${userId}`);
+        console.log(`✅ DB UPDATED: +${creditsToAdd.toLocaleString()} for ${userId}`);
       } else {
-        console.log(`❌ FAIL: User ${userId} found, but path 'balances.tokenCredits' failed.`);
+        console.log(`❌ DB FAIL: User ${userId} found, but no changes made.`);
       }
     } catch (err) {
-      console.error("❌ Automation Database Error:", err);
+      console.error("❌ DB ERROR:", err);
     } finally {
       await client.close();
     }
