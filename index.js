@@ -34,18 +34,16 @@ app.get('/pay', async (req, res) => {
       data: {
         data: {
           attributes: {
-            send_email_receipt: true,
+            send_email_receipt: true, 
             billing: { email: email },
-            show_description: true,
-            customer_email: email,
             line_items: [{ 
               amount: price, 
               currency: 'PHP', 
               name: "Token Pack", 
               description: `Top-up of ${totalTokens.toLocaleString()} tokens`,
-              quantity: 1
+              quantity: qty 
             }],
-            payment_method_types: ['qrph', 'gcash', 'card'],
+            payment_method_types: ['qrph'],
             success_url: process.env.SUCCESS_URL,
             metadata: { email: email, token_credits: totalTokens.toString() } 
           }
