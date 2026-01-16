@@ -40,7 +40,7 @@ app.get('/pay', async (req, res) => {
               description: `Top-up of ${totalTokens.toLocaleString()} tokens`,
               quantity: qty 
             }],
-            payment_method_types: ['qrph', 'gcash', 'card'],
+            payment_method_types: ['qrph'],
             success_url: process.env.SUCCESS_URL,
             metadata: { email: email, token_credits: totalTokens.toString() } 
           }
