@@ -5,12 +5,15 @@ const app = express();
 
 app.use(express.json());
 
-// 1. Health Check
-app.get('/', (req, res) => res.status(200).send("SERVER IS ALIVE"));
+// 1. Health Check & Keep-Alive
+app.get('/', (req, res) => {
+  console.log("💓 Health check ping received");
+  res.status(200).send("SERVER IS ALIVE");
+});
 
 const PRICING = { 1: 25000, 2: 45000, 3: 60000, 4: 72000, 5: 85000 };
 
-// 2. THE PAY ROUTE (Initiates Checkout)
+// 2. THE PAY ROUTE
 app.get('/pay', async (req, res) => {
   try {
     const { email, quantity } = req.query; 
@@ -31,8 +34,7 @@ app.get('/pay', async (req, res) => {
       data: {
         data: {
           attributes: {
-            send_email_receipt: true, // Sends receipt via PayMongo
-            show_description: true,
+            send_email_receipt: true, 
             billing: { email: email },
             line_items: [{ 
               amount: price, 
@@ -57,18 +59,71 @@ app.get('/pay', async (req, res) => {
   }
 });
 
-// 3. THE WEBHOOK (Processes Payment)
+// 3. THE WEBHOOK (Metadata Hunter)
 app.post('/webhook', async (req, res) => {
-  console.log("⚡ Webhook Received");
-  const body = req.body;
+  console.log("⚡ [WEBHOOK] Signal received from PayMongo");
   
-  // Extracting metadata from PayMongo's nested structure
-  const resource = body.data?.attributes?.data || body.data; 
-  const metadata = resource?.attributes?.metadata || resource?.metadata;
+  try {
+    const body = req.body;
+    
+    // Extract metadata from nested structure
+    const resource = body.data?.attributes?.data || body.data; 
+    const metadata = resource?.attributes?.metadata || resource?.metadata;
 
-  if (body.data?.type === 'checkout_session.payment.paid' || body.data?.type === 'payment.paid') {
-    const userEmail = metadata?.email;
-    const amount = parseInt(metadata?.token_credits);
+    if (!metadata || !metadata.email) {
+      console.log("⚠️ Webhook received but no email found in metadata. Full body check...");
+      return res.status(200).send('OK');
+    }
 
-    if (!userEmail) {
-      console.error("❌ No email
+    const userEmail = metadata.email;
+    const amount = parseInt(metadata.token_credits);
+
+    console.log(`🎯 TARGET: ${userEmail} | ADDING: ${amount} tokens`);
+
+    const client = new MongoClient(process.env.MONGO_URI);
+    await client.connect();
+    const db = client.db("test");
+
+    // FIND THE USER _ID
+    const userDoc = await db.collection('users').findOne({ email: userEmail });
+
+    if (!userDoc) {
+      console.error(`❌ FAILED: User ${userEmail} not found in database.`);
+      await client.close();
+      return res.status(200).send('OK');
+    }
+
+    const realId = userDoc._id;
+
+    // UPDATE BALANCES (Safety checks for Object and String IDs)
+    const updateResult = await db.collection('balances').updateOne(
+      { $or: [{ _id: realId }, { user: realId }, { _id: realId.toString() }, { user: realId.toString() }] },
+      { 
+        $inc: { "tokenCredits": amount },
+        $set: { "last_topup": new Date(), "updatedAt": new Date() }
+      }
+    );
+
+    if (updateResult.modifiedCount > 0) {
+      console.log(`🎉 SUCCESS: Tokens added to ${userEmail}`);
+    } else {
+      console.log("🆕 CREATING: New record created for user.");
+      await db.collection('balances').insertOne({
+        user: realId,
+        tokenCredits: amount,
+        updatedAt: new Date()
+      });
+    }
+
+    await client.close();
+  } catch (err) {
+    console.error("🔥 WEBHOOK ERROR:", err.message);
+  }
+  
+  res.status(200).send('OK');
+});
+
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ SERVER ONLINE ON PORT ${PORT}`);
+});
