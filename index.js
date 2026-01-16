@@ -5,7 +5,7 @@ const app = express();
 
 app.use(express.json());
 
-// 1. Health Check & Keep-Alive (Prevents Railway from sleeping)
+// 1. Health Check & Keep-Alive
 app.get('/', (req, res) => {
   console.log("💓 Health check ping received");
   res.status(200).send("SERVER IS ALIVE");
@@ -13,18 +13,20 @@ app.get('/', (req, res) => {
 
 const PRICING = { 1: 25000, 2: 45000, 3: 60000, 4: 72000, 5: 85000 };
 
-// 2. THE PAY ROUTE (Generating the Checkout Link)
+// 2. THE PAY ROUTE
 app.get('/pay', async (req, res) => {
   try {
     const { email, quantity } = req.query; 
     const qty = parseInt(quantity) || 1;
-    const price = PRICING[qty] || 25000;
+    const totalPrice = PRICING[qty] || 25000;
+    
+    // MATH FIX: Calculate price per unit so PayMongo displays it correctly
+    const unitPrice = Math.floor(totalPrice / qty); 
+    
     const totalTokens = qty * 5000000;
-
-    // Creates the display text like "5M" or "10M"
     const tokenDisplay = `${totalTokens / 1000000}M`;
 
-    console.log(`🛒 Creating Session: ${email} | Qty: ${qty} | Display: ${tokenDisplay}`);
+    console.log(`🛒 Creating Session: ${email} | Qty: ${qty} | Unit Price: ${unitPrice/100}`);
 
     const options = {
       method: 'POST',
@@ -40,13 +42,13 @@ app.get('/pay', async (req, res) => {
             send_email_receipt: true, 
             billing: { email: email },
             line_items: [{ 
-              amount: price, 
+              amount: unitPrice, // Now 22500 for the 2-pack
               currency: 'PHP', 
               name: `Ryan's Lab: ${tokenDisplay} Tokens`, 
-              description: `Top-up of ${totalTokens.toLocaleString()} tokens`,
-              quantity: 1 // Keep as 1 so PayMongo doesn't multiply your bundle price
+              description: `Bundle of ${qty} Token Packs`,
+              quantity: qty // Now shows "2" on the checkout screen
             }],
-            payment_method_types: ['qrph'],
+            payment_method_types: ['qrph', 'gcash', 'card'],
             success_url: process.env.SUCCESS_URL,
             metadata: { email: email, token_credits: totalTokens.toString() } 
           }
@@ -62,69 +64,45 @@ app.get('/pay', async (req, res) => {
   }
 });
 
-// 3. THE WEBHOOK (Delivering the Tokens)
+// 3. THE WEBHOOK
 app.post('/webhook', async (req, res) => {
-  console.log("⚡ [WEBHOOK] Signal received from PayMongo");
-
-  // A. IMMEDIATELY tell PayMongo "OK" so they don't disable your link
+  console.log("⚡ [WEBHOOK] Signal received");
   res.status(200).send('OK');
 
-  // B. Process the database update in the background
   try {
     const body = req.body;
-    
-    // Extract metadata safely
     const resource = body.data?.attributes?.data || body.data; 
     const metadata = resource?.attributes?.metadata || resource?.metadata;
 
-    if (!metadata || !metadata.email) {
-      console.log("⚠️ No metadata found, ignoring ping.");
-      return;
-    }
+    if (!metadata || !metadata.email) return;
 
     const userEmail = metadata.email;
     const amount = parseInt(metadata.token_credits);
-
-    console.log(`🎯 TARGET: ${userEmail} | ADDING: ${amount} tokens`);
 
     const client = new MongoClient(process.env.MONGO_URI);
     await client.connect();
     const db = client.db("test");
 
-    // FIND THE USER _ID
     const userDoc = await db.collection('users').findOne({ email: userEmail });
-
     if (!userDoc) {
-      console.error(`❌ FAILED: User ${userEmail} not in DB.`);
       await client.close();
       return;
     }
 
     const realId = userDoc._id;
-
-    // UPDATE BALANCES (Checks for both Object and String ID formats)
-    const updateResult = await db.collection('balances').updateOne(
+    await db.collection('balances').updateOne(
       { $or: [{ _id: realId }, { user: realId }, { _id: realId.toString() }, { user: realId.toString() }] },
       { 
         $inc: { "tokenCredits": amount },
         $set: { "last_topup": new Date(), "updatedAt": new Date() }
-      }
+      },
+      { upsert: true }
     );
 
-    if (updateResult.modifiedCount > 0) {
-      console.log(`🎉 SUCCESS: Tokens added to ${userEmail}`);
-    } else {
-      console.log("🆕 CREATING: New balance record for user.");
-      await db.collection('balances').insertOne({
-        user: realId,
-        tokenCredits: amount,
-        updatedAt: new Date()
-      });
-    }
-
     await client.close();
+    console.log(`🎉 SUCCESS: Added ${amount} to ${userEmail}`);
   } catch (err) {
-    console.error("🔥 WEBHOOK BACKGROUND ERROR:", err.message);
+    console.error("🔥 WEBHOOK ERROR:", err.message);
   }
 });
 
