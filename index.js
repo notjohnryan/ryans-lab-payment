@@ -37,7 +37,7 @@ app.get('/pay', async (req, res) => {
             send_email_receipt: true, 
             billing: { email: email },
             show_description: true,
-            customer_email: email,
+            customer_email: email
             billing: { email: email },
             line_items: [{ 
               amount: price, 
