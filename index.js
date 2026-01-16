@@ -34,9 +34,10 @@ app.get('/pay', async (req, res) => {
       data: {
         data: {
           attributes: {
-            send_email_receipt: true, 
+            send_email_receipt: true,
             billing: { email: email },
             show_description: true,
+            customer_email: email,
             line_items: [{ 
               amount: price, 
               currency: 'PHP', 
