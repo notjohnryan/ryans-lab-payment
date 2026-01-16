@@ -5,7 +5,7 @@ const app = express();
 
 app.use(express.json());
 
-// 1. Health Check & Keep-Alive
+// 1. Health Check & Keep-Alive (Prevents Railway from sleeping)
 app.get('/', (req, res) => {
   console.log("💓 Health check ping received");
   res.status(200).send("SERVER IS ALIVE");
@@ -13,7 +13,7 @@ app.get('/', (req, res) => {
 
 const PRICING = { 1: 25000, 2: 45000, 3: 60000, 4: 72000, 5: 85000 };
 
-// 2. THE PAY ROUTE
+// 2. THE PAY ROUTE (Generating the Checkout Link)
 app.get('/pay', async (req, res) => {
   try {
     const { email, quantity } = req.query; 
@@ -21,7 +21,10 @@ app.get('/pay', async (req, res) => {
     const price = PRICING[qty] || 25000;
     const totalTokens = qty * 5000000;
 
-    console.log(`🛒 Creating Session: ${email} | Qty: ${qty}`);
+    // Creates the display text like "5M" or "10M"
+    const tokenDisplay = `${totalTokens / 1000000}M`;
+
+    console.log(`🛒 Creating Session: ${email} | Qty: ${qty} | Display: ${tokenDisplay}`);
 
     const options = {
       method: 'POST',
@@ -39,9 +42,9 @@ app.get('/pay', async (req, res) => {
             line_items: [{ 
               amount: price, 
               currency: 'PHP', 
-              name: "Token Pack", 
+              name: `Ryan's Lab: ${tokenDisplay} Tokens`, 
               description: `Top-up of ${totalTokens.toLocaleString()} tokens`,
-              quantity: 1 
+              quantity: 1 // Keep as 1 so PayMongo doesn't multiply your bundle price
             }],
             payment_method_types: ['qrph'],
             success_url: process.env.SUCCESS_URL,
@@ -59,20 +62,24 @@ app.get('/pay', async (req, res) => {
   }
 });
 
-// 3. THE WEBHOOK (Metadata Hunter)
+// 3. THE WEBHOOK (Delivering the Tokens)
 app.post('/webhook', async (req, res) => {
   console.log("⚡ [WEBHOOK] Signal received from PayMongo");
-  
+
+  // A. IMMEDIATELY tell PayMongo "OK" so they don't disable your link
+  res.status(200).send('OK');
+
+  // B. Process the database update in the background
   try {
     const body = req.body;
     
-    // Extract metadata from nested structure
+    // Extract metadata safely
     const resource = body.data?.attributes?.data || body.data; 
     const metadata = resource?.attributes?.metadata || resource?.metadata;
 
     if (!metadata || !metadata.email) {
-      console.log("⚠️ Webhook received but no email found in metadata. Full body check...");
-      return res.status(200).send('OK');
+      console.log("⚠️ No metadata found, ignoring ping.");
+      return;
     }
 
     const userEmail = metadata.email;
@@ -88,14 +95,14 @@ app.post('/webhook', async (req, res) => {
     const userDoc = await db.collection('users').findOne({ email: userEmail });
 
     if (!userDoc) {
-      console.error(`❌ FAILED: User ${userEmail} not found in database.`);
+      console.error(`❌ FAILED: User ${userEmail} not in DB.`);
       await client.close();
-      return res.status(200).send('OK');
+      return;
     }
 
     const realId = userDoc._id;
 
-    // UPDATE BALANCES (Safety checks for Object and String IDs)
+    // UPDATE BALANCES (Checks for both Object and String ID formats)
     const updateResult = await db.collection('balances').updateOne(
       { $or: [{ _id: realId }, { user: realId }, { _id: realId.toString() }, { user: realId.toString() }] },
       { 
@@ -107,7 +114,7 @@ app.post('/webhook', async (req, res) => {
     if (updateResult.modifiedCount > 0) {
       console.log(`🎉 SUCCESS: Tokens added to ${userEmail}`);
     } else {
-      console.log("🆕 CREATING: New record created for user.");
+      console.log("🆕 CREATING: New balance record for user.");
       await db.collection('balances').insertOne({
         user: realId,
         tokenCredits: amount,
@@ -117,10 +124,8 @@ app.post('/webhook', async (req, res) => {
 
     await client.close();
   } catch (err) {
-    console.error("🔥 WEBHOOK ERROR:", err.message);
+    console.error("🔥 WEBHOOK BACKGROUND ERROR:", err.message);
   }
-  
-  res.status(200).send('OK');
 });
 
 const PORT = process.env.PORT || 8080;
