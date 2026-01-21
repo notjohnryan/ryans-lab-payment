@@ -48,7 +48,7 @@ app.get('/pay', async (req, res) => {
               description: `Bundle of ${qty} Token Packs`,
               quantity: qty // Now shows "2" on the checkout screen
             }],
-            payment_method_types: ['qrph', 'gcash', 'card'],
+            payment_method_types: ['qrph'],
             success_url: process.env.SUCCESS_URL,
             metadata: { email: email, token_credits: totalTokens.toString() } 
           }
