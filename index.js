@@ -5,7 +5,7 @@ const app = express();
 
 app.use(express.json());
 
-// 1. Health Check
+// 1. Health Check & Keep-Alive
 app.get('/', (req, res) => {
   console.log("💓 Health check ping received");
   res.status(200).send("SERVER IS ALIVE");
@@ -13,18 +13,20 @@ app.get('/', (req, res) => {
 
 const PRICING = { 1: 25000, 2: 45000, 3: 60000, 4: 72000, 5: 85000 };
 
-// 2. THE PAY ROUTE (Starts the Session)
+// 2. THE PAY ROUTE
 app.get('/pay', async (req, res) => {
   try {
     const { email, quantity } = req.query; 
     const qty = parseInt(quantity) || 1;
     const totalPrice = PRICING[qty] || 25000;
     
+    // MATH FIX: Calculate price per unit
     const unitPrice = Math.floor(totalPrice / qty); 
+    
     const totalTokens = qty * 5000000;
     const tokenDisplay = `${totalTokens / 1000000}M`;
 
-    console.log(`🛒 Creating Session: ${email} | Qty: ${qty}`);
+    console.log(`🛒 Creating Session: ${email} | Qty: ${qty} | Unit Price: ${unitPrice/100}`);
 
     const options = {
       method: 'POST',
@@ -40,17 +42,15 @@ app.get('/pay', async (req, res) => {
             send_email_receipt: true, 
             billing: { email: email },
             line_items: [{ 
-              amount: unitPrice,
+              amount: unitPrice, 
               currency: 'PHP', 
               name: `Ryan's Lab: ${tokenDisplay} Tokens`, 
+              description: `Bundle of ${qty} Token Packs`,
               quantity: qty 
             }],
             payment_method_types: ['qrph', 'gcash', 'maya'],
             success_url: process.env.SUCCESS_URL,
-            metadata: { 
-              email: email, 
-              token_credits: totalTokens.toString() 
-            } 
+            metadata: { email: email, token_credits: totalTokens.toString() } 
           }
         }
       }
@@ -59,16 +59,14 @@ app.get('/pay', async (req, res) => {
     const response = await axios.request(options);
     res.redirect(response.data.data.attributes.checkout_url);
   } catch (error) {
-    console.error("🔥 Pay Route Error:", error.message);
+    console.error("Pay Route Error:", error.message);
     res.status(500).send("Error generating checkout link");
   }
 });
 
-// 3. THE WEBHOOK (Updates the Database)
+// 3. THE WEBHOOK
 app.post('/webhook', async (req, res) => {
   console.log("⚡ [WEBHOOK] Signal received from PayMongo");
-  
-  // Important: Always respond 200 to PayMongo immediately
   res.status(200).send('OK');
 
   let client;
@@ -87,29 +85,31 @@ app.post('/webhook', async (req, res) => {
 
     client = new MongoClient(process.env.MONGO_URI);
     await client.connect();
-    const db = client.db("test"); // Based on your 'test' storage name
+    const db = client.db("test");
 
-    // STEP A: Find the user ID from the 'users' folder using the Email String
+    // STEP A: Find the user in 'users' folder by email string
     console.log(`🔍 Searching 'users' for: ${userEmail}`);
     const userDoc = await db.collection('users').findOne({ 
       email: { $regex: new RegExp(`^${userEmail}$`, 'i') } 
     });
 
     if (!userDoc) {
-      console.log(`❌ FAILED: Email ${userEmail} not found in 'users' collection.`);
+      console.log(`❌ FAILED: User ${userEmail} not found in database.`);
       return;
     }
 
     const userId = userDoc._id;
-    console.log(`✅ User Found! Internal ID: ${userId}`);
+    console.log(`✅ User Found! ID: ${userId}. Proceeding to balance update.`);
 
-    // STEP B: Update the 'balances' folder
-    // We match the 'user' field using both ObjectId and String formats
+    // STEP B: Update 'balances' folder
+    // Prioritizing _id lookup as requested, with 'user' field as fallback
     const updateResult = await db.collection('balances').updateOne(
       { 
         $or: [
-          { user: userId },           // Matches if stored as ObjectId
-          { user: userId.toString() }  // Matches if stored as String
+          { _id: userId },            // Match by primary ID (most likely for UI)
+          { _id: userId.toString() }, // Match by ID as string
+          { user: userId },           // Match by user field (backup)
+          { user: userId.toString() } // Match by user field as string
         ] 
       },
       { 
@@ -119,15 +119,15 @@ app.post('/webhook', async (req, res) => {
           "updatedAt": new Date() 
         }
       },
-      { upsert: true } // Creates a record if one doesn't exist
+      { upsert: true } 
     );
 
     if (updateResult.modifiedCount > 0) {
-      console.log(`🎉 SUCCESS: Added ${amountToAdd} tokens to existing record for ${userEmail}`);
+      console.log(`🎉 SUCCESS: Updated existing balance for ID: ${userId}`);
     } else if (updateResult.upsertedCount > 0) {
-      console.log(`🎉 SUCCESS: Created NEW balance record for ${userEmail}`);
+      console.log(`🎉 SUCCESS: Created NEW balance record for ID: ${userId}`);
     } else {
-      console.log(`⚠️ DB matched but no changes were made for ${userEmail}`);
+      console.log(`⚠️ DB Match found but no fields changed for ${userEmail}`);
     }
 
   } catch (err) {
