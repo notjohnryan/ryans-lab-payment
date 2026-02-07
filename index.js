@@ -5,7 +5,7 @@ const app = express();
 
 app.use(express.json());
 
-app.get('/', (req, res) => res.status(200).send("RYANS LAB WEBHOOK ACTIVE"));
+app.get('/', (req, res) => res.status(200).send("RYANS LAB FINAL SYNC"));
 
 // --- PAY ROUTE ---
 app.get('/pay', async (req, res) => {
@@ -53,7 +53,7 @@ app.get('/pay', async (req, res) => {
   }
 });
 
-// --- UNIVERSAL WEBHOOK ---
+// --- THE FIXED WEBHOOK ---
 app.post('/webhook', async (req, res) => {
   console.log("⚡ [WEBHOOK] Signal received");
   res.status(200).send('OK');
@@ -62,46 +62,46 @@ app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
     
-    // 🛡️ UNIVERSAL DATA EXTRACTOR
-    // This looks for the email in both the manual CURL format and the REAL PayMongo format
+    // 🛡️ THE "DEEP DRILL" EXTRACTOR
+    // Based on your error log, the metadata is inside body.data.attributes.data.attributes
     const metadata = 
-      body.data?.attributes?.data?.attributes?.metadata || // Your manual CURL format
-      body.data?.attributes?.metadata ||                  // Real PayMongo format
-      body.data?.metadata;                                 // Backup format
+      body.data?.attributes?.data?.attributes?.metadata || 
+      body.data?.attributes?.metadata || 
+      body.data?.metadata;
 
     if (!metadata || !metadata.email) {
-      console.log("⚠️ Could not find email in webhook payload. Payload structure:", JSON.stringify(body).substring(0, 200));
+      console.log("⚠️ STILL NO EMAIL. Full Body Check:", JSON.stringify(body));
       return;
     }
 
     const userEmail = metadata.email.trim().toLowerCase();
-    const tokensToAdd = Number(metadata.token_credits) || 0;
+    const tokensToAdd = Number(metadata.token_credits);
 
     client = new MongoClient(process.env.MONGO_URI);
     await client.connect();
     const db = client.db("test");
 
-    console.log(`🔍 Processing: ${userEmail} | Adding: ${tokensToAdd}`);
+    console.log(`🔍 Processing Success: ${userEmail} | Tokens: ${tokensToAdd}`);
 
-    // 1. Find User
     const userDoc = await db.collection('users').findOne({ 
       email: { $regex: new RegExp(`^${userEmail}$`, 'i') } 
     });
 
     if (!userDoc) {
-      console.log(`❌ User ${userEmail} not found in database.`);
+      console.log(`❌ User ${userEmail} not found in DB.`);
       return;
     }
 
     const userId = userDoc._id;
     const now = new Date();
 
-    // 2. Update Both Collections & All Fields
+    // Update Users
     await db.collection('users').updateOne(
       { _id: userId },
       { $inc: { "tokenCredits": tokensToAdd }, $set: { "last_topup": now, "updatedAt": now } }
     );
 
+    // Update Balances (Nested & Root)
     const balanceUpdate = await db.collection('balances').updateOne(
       { $or: [{ user: userId.toString() }, { user: userId }] },
       { 
@@ -111,13 +111,13 @@ app.post('/webhook', async (req, res) => {
     );
 
     if (balanceUpdate.modifiedCount > 0) {
-      console.log(`🎉 SUCCESS: Added ${tokensToAdd} tokens to ${userEmail}`);
+      console.log(`🎉 SUCCESS: Tokens added for ${userEmail}`);
     } else {
-      console.log(`⚠️ User found but balance record missing. Created record instead.`);
+      console.log(`⚠️ User found, but balance record not found. Creating one...`);
       await db.collection('balances').insertOne({
-         user: userId.toString(),
-         tokenCredits: tokensToAdd,
-         updatedAt: now
+        user: userId.toString(),
+        tokenCredits: tokensToAdd,
+        updatedAt: now
       });
     }
 
