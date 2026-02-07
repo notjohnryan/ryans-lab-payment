@@ -6,11 +6,11 @@ const app = express();
 app.use(express.json());
 
 // 1. Health Check
-app.get('/', (req, res) => res.status(200).send("RYANS LAB FINAL SYNC SERVER"));
+app.get('/', (req, res) => res.status(200).send("RYANS LAB SYSTEM: ONLINE"));
 
 const PRICING = { 1: 25000, 2: 45000, 3: 60000, 4: 72000, 5: 85000 };
 
-// 2. THE PAY ROUTE (QRPH ONLY)
+// 2. THE PAY ROUTE (Strictly QRPH)
 app.get('/pay', async (req, res) => {
   try {
     const { email, quantity } = req.query; 
@@ -39,7 +39,7 @@ app.get('/pay', async (req, res) => {
               quantity: qty,
               images: ["https://ryanslab.space/logo.png"] 
             }],
-            payment_method_types: ['qrph'], // Strictly QRPH
+            payment_method_types: ['qrph'], // Your approved method
             success_url: process.env.SUCCESS_URL,
             metadata: { 
               email: cleanEmail, 
@@ -57,7 +57,7 @@ app.get('/pay', async (req, res) => {
   }
 });
 
-// 3. THE UNIVERSAL WEBHOOK (DEEP DRILL)
+// 3. THE "ANTI-DUPLICATE" WEBHOOK
 app.post('/webhook', async (req, res) => {
   console.log("⚡ [WEBHOOK] Signal received");
   res.status(200).send('OK');
@@ -66,23 +66,14 @@ app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
     
-    // 🛡️ EXTRACTION LOGIC (Based on your Live Log)
-    // Live QRPH payments store metadata inside the first element of the 'payments' array.
+    // 🛡️ EXTRACT METADATA (Checks payments array first for Live QRPH mode)
     const payments = body.data?.attributes?.data?.attributes?.payments;
-    let metadata = null;
-
-    if (payments && payments.length > 0) {
-      metadata = payments[0].attributes?.metadata;
-      console.log("📍 Metadata located in Payments Array (Live Mode)");
-    } else {
-      // Fallback for Manual CURL tests or standard sessions
-      metadata = body.data?.attributes?.data?.attributes?.metadata || 
-                 body.data?.attributes?.metadata;
-      console.log("📍 Metadata located in Session Attributes");
-    }
+    let metadata = (payments && payments.length > 0) 
+      ? payments[0].attributes?.metadata 
+      : (body.data?.attributes?.data?.attributes?.metadata || body.data?.attributes?.metadata);
 
     if (!metadata || !metadata.email) {
-      console.log("⚠️ Webhook received but metadata/email missing from payload.");
+      console.log("⚠️ Webhook received but metadata missing.");
       return;
     }
 
@@ -93,22 +84,22 @@ app.post('/webhook', async (req, res) => {
     await client.connect();
     const db = client.db("test");
 
-    console.log(`🔍 Processing: ${userEmail} | Credits: ${tokensToAdd}`);
+    console.log(`🔍 Processing sync for: ${userEmail} | Credits to add: ${tokensToAdd}`);
 
-    // --- STEP A: SYNC 'users' FOLDER ---
+    // --- STEP A: FIND USER ID ---
     const userDoc = await db.collection('users').findOne({ 
       email: { $regex: new RegExp(`^${userEmail}$`, 'i') } 
     });
 
     if (!userDoc) {
-      console.log(`❌ User ${userEmail} not found in users collection.`);
+      console.log(`❌ User ${userEmail} not found in database.`);
       return;
     }
 
-    const userId = userDoc._id; // This is the linking ID (695a9ee5...)
+    const userId = userDoc._id;
     const now = new Date();
 
-    // Update tokenCredits directly on User
+    // --- STEP B: UPDATE USERS COLLECTION ---
     await db.collection('users').updateOne(
       { _id: userId },
       { 
@@ -117,10 +108,10 @@ app.post('/webhook', async (req, res) => {
       }
     );
 
-    // --- STEP B: SYNC 'balances' FOLDER ---
-    // Targets the document where the 'user' field matches (even if 'Mixed' type)
-    // Updates both the root tokenCredits and the nested balances.tokenCredits found in your JSON
-    const balanceUpdate = await db.collection('balances').updateOne(
+    // --- STEP C: UPDATE ALL DUPLICATE BALANCES ---
+    // Using updateMany ensures that if a user has multiple balance records 
+    // (String ID or ObjectId), they ALL get updated simultaneously.
+    const updateResult = await db.collection('balances').updateMany(
       { 
         $or: [
           { user: userId.toString() }, 
@@ -140,10 +131,11 @@ app.post('/webhook', async (req, res) => {
       }
     );
 
-    if (balanceUpdate.modifiedCount > 0) {
-      console.log(`🎉 SUCCESS: Synced all folders for ${userEmail}`);
+    if (updateResult.matchedCount > 0) {
+      console.log(`🎉 SUCCESS: Synced ${updateResult.modifiedCount} records for ${userEmail}`);
     } else {
-      console.log(`⚠️ Balance record match failed. Creating new entry for user: ${userId}`);
+      // Fallback: Create a record if none exists
+      console.log(`⚠️ No balance record found. Creating new one for ${userEmail}`);
       await db.collection('balances').insertOne({
         user: userId.toString(),
         tokenCredits: tokensToAdd,
