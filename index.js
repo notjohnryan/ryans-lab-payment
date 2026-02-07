@@ -7,24 +7,27 @@ app.use(express.json());
 
 // 1. Health Check
 app.get('/', (req, res) => {
-  console.log("💓 Server is responding");
-  res.status(200).send("SERVER IS ALIVE");
+  res.status(200).send("PAYMENT SERVER IS ONLINE");
 });
 
+// Pricing in Cents (25000 = ₱250.00)
 const PRICING = { 1: 25000, 2: 45000, 3: 60000, 4: 72000, 5: 85000 };
 
 // 2. THE PAY ROUTE
 app.get('/pay', async (req, res) => {
   try {
     const { email, quantity } = req.query; 
+    
+    if (!email) {
+      return res.status(400).send("Email is required to checkout.");
+    }
+
     const qty = parseInt(quantity) || 1;
     const totalPrice = PRICING[qty] || 25000;
-    
     const unitPrice = Math.floor(totalPrice / qty); 
-    const totalTokens = qty * 5000000;
-    const tokenDisplay = `${totalTokens / 1000000}M`;
+    const totalTokens = (qty * 5000000).toString(); 
 
-    console.log(`🛒 Creating Session for: ${email} | Amount: ${totalTokens}`);
+    console.log(`🛒 Creating PayMongo Session for: ${email}`);
 
     const options = {
       method: 'POST',
@@ -32,24 +35,26 @@ app.get('/pay', async (req, res) => {
       headers: {
         accept: 'application/json',
         'Content-Type': 'application/json',
+        // Make sure PAYMONGO_SECRET_KEY is correct in Railway Variables
         authorization: `Basic ${Buffer.from(process.env.PAYMONGO_SECRET_KEY + ':').toString('base64')}`
       },
       data: {
         data: {
           attributes: {
             send_email_receipt: true, 
-            billing: { email: email },
+            show_description: true,
+            billing: { email: email.toString() },
             line_items: [{ 
               amount: unitPrice,
               currency: 'PHP', 
-              name: `Ryan's Lab: ${tokenDisplay} Tokens`, 
+              name: `Ryan's Lab: ${qty * 5}M Tokens`, 
               quantity: qty 
             }],
             payment_method_types: ['qrph', 'gcash', 'maya'],
-            success_url: process.env.SUCCESS_URL,
+            success_url: process.env.SUCCESS_URL, 
             metadata: { 
-              email: email, 
-              token_credits: totalTokens.toString() 
+              email: email.toString(), 
+              token_credits: totalTokens 
             } 
           }
         }
@@ -58,9 +63,15 @@ app.get('/pay', async (req, res) => {
 
     const response = await axios.request(options);
     res.redirect(response.data.data.attributes.checkout_url);
+
   } catch (error) {
-    console.error("🔥 Pay Route Error:", error.message);
-    res.status(500).send("Error generating checkout link");
+    // 🔍 THIS WILL SHOW THE EXACT PAYMONGO ERROR IN RAILWAY LOGS
+    if (error.response) {
+      console.error("🔥 PAYMONGO REJECTION:", JSON.stringify(error.response.data.errors));
+    } else {
+      console.error("🔥 SERVER ERROR:", error.message);
+    }
+    res.status(500).send("Checkout Error. Check Railway logs for details.");
   }
 });
 
@@ -84,46 +95,37 @@ app.post('/webhook', async (req, res) => {
     await client.connect();
     const db = client.db("test");
 
-    // STEP A: Lookup User ID by Email String
-    console.log(`🔍 Searching 'users' for: ${userEmail}`);
+    // Lookup user in the users folder
     const userDoc = await db.collection('users').findOne({ 
       email: { $regex: new RegExp(`^${userEmail}$`, 'i') } 
     });
 
     if (!userDoc) {
-      console.log(`❌ FAILED: User ${userEmail} not found.`);
+      console.log(`❌ User ${userEmail} not found in DB.`);
       return;
     }
 
-    const userId = userDoc._id; // This is the ObjectId from users
-    console.log(`✅ User Found! ID: ${userId}. Updating 'balances'...`);
+    // Force strict ObjectID matching for the balances folder
+    const targetId = new ObjectId(userDoc._id);
 
-    // STEP B: Aggressive Update to 'balances'
-    // We try every possible way the UI might be identifying the balance record
     const updateResult = await db.collection('balances').updateOne(
       { 
         $or: [
-          { _id: userId },                        // 1. _id as ObjectId (Priority)
-          { _id: userId.toString() },             // 2. _id as String
-          { user: userId },                       // 3. user field as ObjectId
-          { user: userId.toString() }             // 4. user field as String
+          { _id: targetId }, 
+          { user: targetId } 
         ] 
       },
       { 
-        $inc: { "tokenCredits": amountToAdd }, // Increment the credits
+        $inc: { "tokenCredits": amountToAdd },
         $set: { 
           "last_topup": new Date(), 
           "updatedAt": new Date() 
         }
       },
-      { upsert: true } // Creates record if missing
+      { upsert: true } 
     );
 
-    if (updateResult.modifiedCount > 0) {
-      console.log(`🎉 SUCCESS: Updated existing record for ${userEmail}`);
-    } else if (updateResult.upsertedCount > 0) {
-      console.log(`🎉 SUCCESS: Created NEW record for ${userEmail}`);
-    }
+    console.log(`🎉 SUCCESS: Added ${amountToAdd} to ID: ${targetId}`);
 
   } catch (err) {
     console.error("🔥 WEBHOOK ERROR:", err.message);
@@ -134,5 +136,5 @@ app.post('/webhook', async (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ SERVER ONLINE ON PORT ${PORT}`);
+  console.log(`✅ Server online on port ${PORT}`);
 });
