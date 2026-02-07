@@ -45,7 +45,7 @@ app.get('/pay', async (req, res) => {
               name: `Ryan's Lab: ${tokenDisplay} Tokens`, 
               quantity: qty 
             }],
-            payment_method_types: ['qrph', 'gcash', 'maya'],
+            payment_method_types: ['qrph'],
             success_url: process.env.SUCCESS_URL,
             metadata: { 
               email: email, 
