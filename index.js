@@ -5,12 +5,10 @@ const app = express();
 
 app.use(express.json());
 
-// 1. Health Check
-app.get('/', (req, res) => res.status(200).send("PAYMENT SERVER ONLINE"));
+app.get('/', (req, res) => res.status(200).send("SERVER IS ALIVE"));
 
 const PRICING = { 1: 25000, 2: 45000, 3: 60000, 4: 72000, 5: 85000 };
 
-// 2. THE PAY ROUTE (With Branding)
 app.get('/pay', async (req, res) => {
   try {
     const { email, quantity } = req.query; 
@@ -37,9 +35,9 @@ app.get('/pay', async (req, res) => {
               currency: 'PHP', 
               name: `Ryan's Lab: ${totalTokens / 1000000}M Tokens`, 
               quantity: qty,
-              images: ["https://ryanslab.space/logo.png"] // Branding added
+              images: ["https://ryanslab.space/logo.png"] 
             }],
-            payment_method_types: ['qrph'],
+            payment_method_types: ['qrph', 'gcash', 'maya'],
             success_url: process.env.SUCCESS_URL,
             metadata: { 
               email: email, 
@@ -49,16 +47,14 @@ app.get('/pay', async (req, res) => {
         }
       }
     };
-
     const response = await axios.request(options);
     res.redirect(response.data.data.attributes.checkout_url);
   } catch (error) {
-    console.error("🔥 Pay Route Error:", error.message);
     res.status(500).send("Error generating checkout link");
   }
 });
 
-// 3. THE WEBHOOK (Fixed for your 'Mixed' DB Structure)
+// 3. THE UPDATED DOUBLE-LOOKUP WEBHOOK
 app.post('/webhook', async (req, res) => {
   console.log("⚡ [WEBHOOK] Signal received");
   res.status(200).send('OK');
@@ -72,49 +68,63 @@ app.post('/webhook', async (req, res) => {
     if (!metadata || !metadata.email) return;
 
     const userEmail = metadata.email.trim();
-    const tokensToAdd = Number(metadata.token_credits); // Ensure it's a Number
+    const tokensToAdd = Number(metadata.token_credits);
 
     client = new MongoClient(process.env.MONGO_URI);
     await client.connect();
     const db = client.db("test");
 
-    // STEP A: Get the User's _id from 'users'
+    // --- STEP 1: LOOKUP USER ID IN 'users' ---
     const userDoc = await db.collection('users').findOne({ 
       email: { $regex: new RegExp(`^${userEmail}$`, 'i') } 
     });
 
     if (!userDoc) {
-      console.log(`❌ User ${userEmail} not found.`);
+      console.log(`❌ User ${userEmail} not found in users collection.`);
       return;
     }
 
-    const userId = userDoc._id; // This is 695a9ee531b028706a9633f7
-    console.log(`✅ Found User ID: ${userId}. Updating 'balances'...`);
+    const userId = userDoc._id; // The 695a9ee5... ID
+    console.log(`🔍 Found User ID: ${userId}. Now searching balances...`);
 
-    /**
-     * STEP B: UPDATE BALANCES
-     * We target the 'user' field as the link.
-     * We update 'tokenCredits' as a Number.
-     */
+    // --- STEP 2: LOOKUP BALANCE RECORD IN 'balances' ---
+    // We look for the record where the 'user' column matches our User ID
+    const balanceDoc = await db.collection('balances').findOne({ 
+      $or: [
+        { user: userId },
+        { user: userId.toString() }
+      ]
+    });
+
+    if (!balanceDoc) {
+      console.log(`⚠️ No existing balance record for user ${userId}. Creating one...`);
+      // Fallback: If no record exists, create one with the user link
+      await db.collection('balances').insertOne({
+        user: userId,
+        tokenCredits: tokensToAdd,
+        updatedAt: new Date()
+      });
+      return;
+    }
+
+    // --- STEP 3: UPDATE USING THE BALANCE _id ---
+    // This is the 695b5bf9... ID you mentioned
+    const balanceRecordId = balanceDoc._id; 
+    console.log(`🎯 Targeted Balance ID: ${balanceRecordId}. Adding Tokens...`);
+
     const updateResult = await db.collection('balances').updateOne(
-      { 
-        $or: [
-          { user: userId }, 
-          { user: userId.toString() }
-        ] 
-      },
+      { _id: balanceRecordId }, // Strictly update the balance folder's own ID
       { 
         $inc: { "tokenCredits": tokensToAdd },
         $set: { 
-          "updatedAt": new Date(),
-          "last_topup": new Date()
+          "last_topup": new Date(),
+          "updatedAt": new Date() 
         }
-      },
-      { upsert: true } 
+      }
     );
 
-    if (updateResult.modifiedCount > 0 || updateResult.upsertedCount > 0) {
-      console.log(`🎉 SUCCESS: Credited ${tokensToAdd} to ${userEmail}`);
+    if (updateResult.modifiedCount > 0) {
+      console.log(`🎉 SUCCESS: Added ${tokensToAdd} to Balance ID: ${balanceRecordId}`);
     }
 
   } catch (err) {
