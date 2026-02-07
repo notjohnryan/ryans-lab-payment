@@ -5,17 +5,16 @@ const app = express();
 
 app.use(express.json());
 
-app.get('/', (req, res) => res.status(200).send("SYNC SERVER ACTIVE"));
+app.get('/', (req, res) => res.status(200).send("RYANS LAB WEBHOOK ACTIVE"));
 
-const PRICING = { 1: 25000, 2: 45000, 3: 60000, 4: 72000, 5: 85000 };
-
+// --- PAY ROUTE ---
 app.get('/pay', async (req, res) => {
   try {
     const { email, quantity } = req.query; 
+    const cleanEmail = email ? email.toString().trim().toLowerCase() : "";
     const qty = parseInt(quantity) || 1;
-    const totalPrice = PRICING[qty] || 25000;
-    const unitPrice = Math.floor(totalPrice / qty); 
     const totalTokens = qty * 5000000;
+    const totalPrice = { 1: 25000, 2: 45000, 3: 60000, 4: 72000, 5: 85000 }[qty] || 25000;
 
     const options = {
       method: 'POST',
@@ -29,16 +28,20 @@ app.get('/pay', async (req, res) => {
         data: {
           attributes: {
             send_email_receipt: true, 
-            billing: { email: email },
+            billing: { email: cleanEmail },
             line_items: [{ 
-              amount: unitPrice, currency: 'PHP', 
+              amount: Math.floor(totalPrice / qty), 
+              currency: 'PHP', 
               name: `Ryan's Lab: ${totalTokens / 1000000}M Tokens`, 
               quantity: qty,
               images: ["https://ryanslab.space/logo.png"] 
             }],
             payment_method_types: ['qrph'],
             success_url: process.env.SUCCESS_URL,
-            metadata: { email: email, token_credits: totalTokens.toString() } 
+            metadata: { 
+              email: cleanEmail, 
+              token_credits: totalTokens.toString() 
+            } 
           }
         }
       }
@@ -50,75 +53,72 @@ app.get('/pay', async (req, res) => {
   }
 });
 
+// --- UNIVERSAL WEBHOOK ---
 app.post('/webhook', async (req, res) => {
   console.log("⚡ [WEBHOOK] Signal received");
   res.status(200).send('OK');
 
   let client;
   try {
-    const { data } = req.body;
-    const resource = data?.attributes?.data || data; 
-    const metadata = resource?.attributes?.metadata || resource?.metadata;
-    if (!metadata || !metadata.email) return;
+    const body = req.body;
+    
+    // 🛡️ UNIVERSAL DATA EXTRACTOR
+    // This looks for the email in both the manual CURL format and the REAL PayMongo format
+    const metadata = 
+      body.data?.attributes?.data?.attributes?.metadata || // Your manual CURL format
+      body.data?.attributes?.metadata ||                  // Real PayMongo format
+      body.data?.metadata;                                 // Backup format
 
-    const userEmail = metadata.email.trim();
-    const tokensToAdd = Number(metadata.token_credits);
+    if (!metadata || !metadata.email) {
+      console.log("⚠️ Could not find email in webhook payload. Payload structure:", JSON.stringify(body).substring(0, 200));
+      return;
+    }
+
+    const userEmail = metadata.email.trim().toLowerCase();
+    const tokensToAdd = Number(metadata.token_credits) || 0;
 
     client = new MongoClient(process.env.MONGO_URI);
     await client.connect();
     const db = client.db("test");
 
-    // 1. Find the User first
+    console.log(`🔍 Processing: ${userEmail} | Adding: ${tokensToAdd}`);
+
+    // 1. Find User
     const userDoc = await db.collection('users').findOne({ 
       email: { $regex: new RegExp(`^${userEmail}$`, 'i') } 
     });
 
     if (!userDoc) {
-      console.log(`❌ User ${userEmail} not found.`);
+      console.log(`❌ User ${userEmail} not found in database.`);
       return;
     }
 
-    const userId = userDoc._id; // This is the $oid: 695a9ee5...
+    const userId = userDoc._id;
     const now = new Date();
 
-    console.log(`🔍 Syncing tokens for User: ${userEmail} (${userId})`);
-
-    // --- TASK A: UPDATE THE 'users' COLLECTION ---
-    // You have tokenCredits directly in the user folder. Update them there too.
+    // 2. Update Both Collections & All Fields
     await db.collection('users').updateOne(
       { _id: userId },
+      { $inc: { "tokenCredits": tokensToAdd }, $set: { "last_topup": now, "updatedAt": now } }
+    );
+
+    const balanceUpdate = await db.collection('balances').updateOne(
+      { $or: [{ user: userId.toString() }, { user: userId }] },
       { 
-        $inc: { "tokenCredits": tokensToAdd },
-        $set: { "last_topup": now, "updatedAt": now }
+        $inc: { "tokenCredits": tokensToAdd, "balances.tokenCredits": tokensToAdd },
+        $set: { "last_topup": now, "balances.last_topup": now, "updatedAt": now }
       }
     );
 
-    // --- TASK B: UPDATE THE 'balances' COLLECTION ---
-    // We target the 'user' field (which is a string "695a9ee5...")
-    const updateResult = await db.collection('balances').updateOne(
-      { 
-        $or: [
-          { user: userId.toString() }, 
-          { user: userId }
-        ] 
-      },
-      { 
-        $inc: { 
-          "tokenCredits": tokensToAdd,           // The root field
-          "balances.tokenCredits": tokensToAdd   // The nested field in your JSON
-        },
-        $set: { 
-          "last_topup": now,
-          "balances.last_topup": now,
-          "updatedAt": now 
-        }
-      }
-    );
-
-    if (updateResult.modifiedCount > 0) {
-      console.log(`🎉 SUCCESS: Synced all token fields for ${userEmail}`);
+    if (balanceUpdate.modifiedCount > 0) {
+      console.log(`🎉 SUCCESS: Added ${tokensToAdd} tokens to ${userEmail}`);
     } else {
-      console.log(`⚠️ Balance record match failed, check the 'user' field format.`);
+      console.log(`⚠️ User found but balance record missing. Created record instead.`);
+      await db.collection('balances').insertOne({
+         user: userId.toString(),
+         tokenCredits: tokensToAdd,
+         updatedAt: now
+      });
     }
 
   } catch (err) {
@@ -129,4 +129,4 @@ app.post('/webhook', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, '0.0.0.0', () => console.log(`🚀 SYNC SERVER ONLINE`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 READY`));
