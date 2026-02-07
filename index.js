@@ -7,24 +7,20 @@ app.use(express.json());
 
 // 1. Health Check
 app.get('/', (req, res) => {
-  console.log("💓 Server is responding");
-  res.status(200).send("SERVER IS ALIVE");
+  res.status(200).send("RYANS LAB SERVER IS ONLINE");
 });
 
-const PRICING = { 1: 25000, 2: 45000, 3: 60000, 4: 72000, 5: 85000 };
-
-// 2. THE PAY ROUTE
+// 2. THE PAY ROUTE (Ultra-Minimalist)
 app.get('/pay', async (req, res) => {
   try {
-    const { email, quantity } = req.query; 
-    const qty = parseInt(quantity) || 1;
-    const totalPrice = PRICING[qty] || 25000;
+    const { email, quantity } = req.query;
     
-    const unitPrice = Math.floor(totalPrice / qty); 
-    const totalTokens = qty * 5000000;
-    const tokenDisplay = `${totalTokens / 1000000}M`;
+    // Fallback values to ensure no nulls are sent
+    const userEmail = email ? email.toString() : "customer@ryanslab.space";
+    const qty = parseInt(quantity) || 1;
+    const amountInCents = 25000 * qty; // Simplified math
 
-    console.log(`🛒 Creating Session for: ${email} | Amount: ${totalTokens}`);
+    console.log(`🛒 Attempting session for: ${userEmail}`);
 
     const options = {
       method: 'POST',
@@ -32,25 +28,26 @@ app.get('/pay', async (req, res) => {
       headers: {
         accept: 'application/json',
         'Content-Type': 'application/json',
+        // Forced "Basic" auth format
         authorization: `Basic ${Buffer.from(process.env.PAYMONGO_SECRET_KEY + ':').toString('base64')}`
       },
       data: {
         data: {
           attributes: {
-            send_email_receipt: true, 
-            billing: { email: email },
-            line_items: [{ 
-              amount: unitPrice,
-              currency: 'PHP', 
-              name: `Ryan's Lab: ${tokenDisplay} Tokens`, 
-              quantity: qty 
+            // Simplified line items - PayMongo sometimes fails on complex descriptions
+            line_items: [{
+              amount: amountInCents,
+              currency: 'PHP',
+              name: "Token Credits",
+              quantity: 1
             }],
             payment_method_types: ['qrph'],
-            success_url: process.env.SUCCESS_URL,
-            metadata: { 
-              email: email, 
-              token_credits: totalTokens.toString() 
-            } 
+            // HARDCODED Success URL to test if Environment Variable is the issue
+            success_url: "https://ryanslab.space",
+            metadata: {
+              email: userEmail,
+              token_credits: (qty * 5000000).toString()
+            }
           }
         }
       }
@@ -58,13 +55,19 @@ app.get('/pay', async (req, res) => {
 
     const response = await axios.request(options);
     res.redirect(response.data.data.attributes.checkout_url);
+
   } catch (error) {
-    console.error("🔥 Pay Route Error:", error.message);
-    res.status(500).send("Error generating checkout link");
+    if (error.response) {
+      // Log the full body to see if there's a hidden message
+      console.error("🔥 PAYMONGO FULL ERROR:", JSON.stringify(error.response.data));
+    } else {
+      console.error("🔥 SERVER ERROR:", error.message);
+    }
+    res.status(500).send("Checkout Failed. Check Dashboard Whitelisting.");
   }
 });
 
-// 3. THE WEBHOOK
+// 3. THE WEBHOOK (Strict ObjectId Match)
 app.post('/webhook', async (req, res) => {
   console.log("⚡ [WEBHOOK] Signal received");
   res.status(200).send('OK');
@@ -77,54 +80,26 @@ app.post('/webhook', async (req, res) => {
 
     if (!metadata || !metadata.email) return;
 
-    const userEmail = metadata.email.trim();
-    const amountToAdd = parseInt(metadata.token_credits);
-
     client = new MongoClient(process.env.MONGO_URI);
     await client.connect();
     const db = client.db("test");
 
-    // STEP A: Lookup User ID by Email String
-    console.log(`🔍 Searching 'users' for: ${userEmail}`);
     const userDoc = await db.collection('users').findOne({ 
-      email: { $regex: new RegExp(`^${userEmail}$`, 'i') } 
+      email: { $regex: new RegExp(`^${metadata.email.trim()}$`, 'i') } 
     });
 
-    if (!userDoc) {
-      console.log(`❌ FAILED: User ${userEmail} not found.`);
-      return;
+    if (userDoc) {
+      const targetId = new ObjectId(userDoc._id);
+      await db.collection('balances').updateOne(
+        { $or: [{ _id: targetId }, { user: targetId }] },
+        { 
+          $inc: { "tokenCredits": parseInt(metadata.token_credits) },
+          $set: { "updatedAt": new Date() }
+        },
+        { upsert: true }
+      );
+      console.log(`🎉 SUCCESS: Credited ${targetId}`);
     }
-
-    const userId = userDoc._id; // This is the ObjectId from users
-    console.log(`✅ User Found! ID: ${userId}. Updating 'balances'...`);
-
-    // STEP B: Aggressive Update to 'balances'
-    // We try every possible way the UI might be identifying the balance record
-    const updateResult = await db.collection('balances').updateOne(
-      { 
-        $or: [
-          { _id: userId },                        // 1. _id as ObjectId (Priority)
-          { _id: userId.toString() },             // 2. _id as String
-          { user: userId },                       // 3. user field as ObjectId
-          { user: userId.toString() }             // 4. user field as String
-        ] 
-      },
-      { 
-        $inc: { "tokenCredits": amountToAdd }, // Increment the credits
-        $set: { 
-          "last_topup": new Date(), 
-          "updatedAt": new Date() 
-        }
-      },
-      { upsert: true } // Creates record if missing
-    );
-
-    if (updateResult.modifiedCount > 0) {
-      console.log(`🎉 SUCCESS: Updated existing record for ${userEmail}`);
-    } else if (updateResult.upsertedCount > 0) {
-      console.log(`🎉 SUCCESS: Created NEW record for ${userEmail}`);
-    }
-
   } catch (err) {
     console.error("🔥 WEBHOOK ERROR:", err.message);
   } finally {
@@ -134,5 +109,5 @@ app.post('/webhook', async (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ SERVER ONLINE ON PORT ${PORT}`);
+  console.log(`🚀 Server listening on ${PORT}`);
 });
