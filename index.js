@@ -8,7 +8,8 @@ app.use(express.json());
 // 1. Health Check
 app.get('/', (req, res) => res.status(200).send("RYANS LAB SYSTEM: ONLINE"));
 
-const PRICING = { 1: 25000, 2: 45000, 3: 60000, 4: 72000, 5: 85000 };
+// REMOVED: Old pricing structure
+// const PRICING = { 1: 25000, 2: 45000, 3: 60000, 4: 72000, 5: 85000 };
 
 // 2. THE PAY ROUTE (Strictly QRPH)
 app.get('/pay', async (req, res) => {
@@ -16,8 +17,13 @@ app.get('/pay', async (req, res) => {
     const { email, quantity } = req.query; 
     const cleanEmail = email ? email.toString().trim().toLowerCase() : "";
     const qty = parseInt(quantity) || 1;
-    const totalTokens = qty * 5000000;
-    const totalPrice = PRICING[qty] || 25000;
+    
+    // NEW: Linear pricing - ₱50 per 1M tokens
+    const totalTokens = qty * 1000000; // 1M tokens per unit
+    const pricePerMillion = 5000; // ₱50 in centavos (50 * 100)
+    
+    // Calculate total price for display
+    const totalPriceCents = qty * pricePerMillion;
 
     const options = {
       method: 'POST',
@@ -33,13 +39,13 @@ app.get('/pay', async (req, res) => {
             send_email_receipt: true, 
             billing: { email: cleanEmail },
             line_items: [{ 
-              amount: Math.floor(totalPrice / qty), 
+              amount: pricePerMillion, // ₱50 per 1M tokens
               currency: 'PHP', 
-              name: `Ryan's Lab: ${totalTokens / 1000000}M Tokens`, 
-              quantity: qty,
+              name: `Ryan's Lab: ${qty}M Tokens`, 
+              quantity: qty, // Quantity matches token millions
               images: ["https://ryanslab.space/logo.png"] 
             }],
-            payment_method_types: ['qrph'], // Your approved method
+            payment_method_types: ['qrph'],
             success_url: process.env.SUCCESS_URL,
             metadata: { 
               email: cleanEmail, 
@@ -57,7 +63,7 @@ app.get('/pay', async (req, res) => {
   }
 });
 
-// 3. THE "ANTI-DUPLICATE" WEBHOOK
+// 3. THE "ANTI-DUPLICATE" WEBHOOK (No changes needed here)
 app.post('/webhook', async (req, res) => {
   console.log("⚡ [WEBHOOK] Signal received");
   res.status(200).send('OK');
@@ -66,7 +72,7 @@ app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
     
-    // 🛡️ EXTRACT METADATA (Checks payments array first for Live QRPH mode)
+    // Extract metadata
     const payments = body.data?.attributes?.data?.attributes?.payments;
     let metadata = (payments && payments.length > 0) 
       ? payments[0].attributes?.metadata 
@@ -109,8 +115,6 @@ app.post('/webhook', async (req, res) => {
     );
 
     // --- STEP C: UPDATE ALL DUPLICATE BALANCES ---
-    // Using updateMany ensures that if a user has multiple balance records 
-    // (String ID or ObjectId), they ALL get updated simultaneously.
     const updateResult = await db.collection('balances').updateMany(
       { 
         $or: [
